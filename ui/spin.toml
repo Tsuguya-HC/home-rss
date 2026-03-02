@@ -1,0 +1,16 @@
+spin_manifest_version = 2
+
+[application]
+name = "home-rss-ui"
+version = "0.1.0"
+
+[[trigger.http]]
+route = "/..."
+component = "ui"
+
+[component.ui]
+source = "../target/wasm32-wasip1/release/home_rss_ui.wasm"
+allowed_outbound_hosts = []
+[component.ui.build]
+command = "cargo build --target wasm32-wasip1 --release -p home-rss-ui"
+workdir = ".."

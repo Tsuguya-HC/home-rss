@@ -1,0 +1,20 @@
+spin_manifest_version = 2
+
+[application]
+name = "home-rss-cleaner"
+version = "0.1.0"
+
+[variables]
+db_url = { required = true }
+
+[[trigger.command]]
+component = "cleaner"
+
+[component.cleaner]
+source = "../target/wasm32-wasip1/release/home-rss-cleaner.wasm"
+allowed_outbound_hosts = ["postgres://*:5432"]
+[component.cleaner.variables]
+db_url = "{{ db_url }}"
+[component.cleaner.build]
+command = "cargo build --target wasm32-wasip1 --release -p home-rss-cleaner"
+workdir = ".."

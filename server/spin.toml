@@ -1,0 +1,21 @@
+spin_manifest_version = 2
+
+[application]
+name = "home-rss-server"
+version = "0.1.0"
+
+[variables]
+db_url = { required = true }
+
+[[trigger.http]]
+route = "/api/..."
+component = "server"
+
+[component.server]
+source = "../target/wasm32-wasip1/release/home_rss_server.wasm"
+allowed_outbound_hosts = ["postgres://*:5432"]
+[component.server.variables]
+db_url = "{{ db_url }}"
+[component.server.build]
+command = "cargo build --target wasm32-wasip1 --release -p home-rss-server"
+workdir = ".."
