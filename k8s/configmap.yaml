@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: claude-code-config
+  namespace: claude-code
+data:
+  CLAUDE.md: |
+    # Claude Code (Container Agent)
+
+    ## Environment
+    - Argo Workflow コンテナ内で実行中
+    - ワークスペース: /workspace (home-rss リポジトリ)
+    - 利用可能ツール: git, gh, cargo, spin, rustc
+
+    ## Language
+    - Respond in Japanese (PR description, commit body)
+    - Commit messages in English
+
+    ## Workflow
+    1. `gh issue view <N>` で issue を読み、要件を理解する
+    2. ブランチは作成済み (issue-<N>)
+    3. コードを実装
+    4. `cargo check --target wasm32-wasip1` でコンパイルエラーがないか確認
+    5. 変更をコミット (Co-Authored-By は不要)
+    6. `git push origin <branch>`
+    7. `gh pr create` で PR 作成
+
+    ## PR 規約
+    - タイトル: 70文字以内、英語
+    - 本文: 日本語で変更内容と理由を説明
+    - issue を closes で紐付け (例: Closes #N)
+
+    ## Rules
+    - 機密値 (token, key, password) を絶対にコミットしない
+    - issue のスコープに集中し、関係ない変更をしない
+    - 不明点があれば PR の本文に記載して人間にレビューを委ねる
