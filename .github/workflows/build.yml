@@ -1,0 +1,41 @@
+name: Build and Push
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: fermyon/actions/spin/setup@v1
+        with:
+          plugins: trigger-command
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build all services
+        run: cargo build --target wasm32-wasip1 --release
+
+      - name: Push OCI images
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          for service in server ui fetcher cleaner; do
+            spin registry push -f "${service}/spin.toml" "ghcr.io/tsuguya/home-rss-${service}:${TAG}"
+          done
