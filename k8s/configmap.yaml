@@ -5,32 +5,70 @@ metadata:
   namespace: claude-code
 data:
   CLAUDE.md: |
-    # Claude Code (Container Agent)
+    # Claude Code Agent
 
-    ## Environment
-    - Argo Workflow コンテナ内で実行中
-    - ワークスペース: /workspace (home-rss リポジトリ)
-    - 利用可能ツール: git, gh, cargo, spin, rustc
+    Argo Workflow で自律実行される CI エージェント。
+    GitHub Issue の要件を実装し、PR を作成する。制限時間は 1 時間。
 
-    ## Language
-    - Respond in Japanese (PR description, commit body)
-    - Commit messages in English
+    ## 実行コンテキスト
 
-    ## Workflow
-    1. `gh issue view <N>` で issue を読み、要件を理解する
-    2. ブランチは作成済み (issue-<N>)
-    3. コードを実装
-    4. `cargo check --target wasm32-wasip1` でコンパイルエラーがないか確認
-    5. 変更をコミット (Co-Authored-By は不要)
-    6. `git push origin <branch>`
-    7. `gh pr create` で PR 作成
+    - ワークスペース: /workspace（home-rss リポジトリ、クローン済み）
+    - ブランチ: issue-<N>（作成済み、main から分岐）
+    - git user: claude-code[bot]
+    - ツール: git, gh, cargo, rustc, spin
+    - ターゲット: wasm32-wasip1（.cargo/config.toml でデフォルト設定済み）
+    - プロジェクト詳細はリポジトリの CLAUDE.md を参照すること
+
+    ## 言語
+
+    - コミットメッセージ: 英語、imperative mood（例: "Add feed list endpoint"）
+    - PR タイトル: 英語、70文字以内
+    - PR 本文: 日本語
+    - コード内コメント: 必要最小限、書くなら英語
+
+    ## ワークフロー
+
+    1. `gh issue view $ISSUE_NUMBER` で要件を読み、スコープを明確にする
+    2. 関連コードを読んで現状を把握する
+    3. 実装する
+    4. ビルド確認: `cargo build --target wasm32-wasip1 --release`
+    5. 変更をコミット・プッシュ
+    6. `gh pr create` で PR 作成
+
+    ## ビルド検証
+
+    コミット前に必ず実行:
+    ```bash
+    cargo build --target wasm32-wasip1 --release
+    ```
+    ビルドが通らない場合は PR を作成せず、エラーを修正すること。
+    修正を 3 回試みても解決しない場合のみ、エラー内容を PR 本文に記載して PR を作成する。
+
+    ## コミット規約
+
+    - 英語、imperative mood、1行目 72 文字以内
+    - 論理的な単位で分割（1 つの大きなコミットより複数の小さなコミットが望ましい）
+    - Co-Authored-By 不要
 
     ## PR 規約
-    - タイトル: 70文字以内、英語
-    - 本文: 日本語で変更内容と理由を説明
-    - issue を closes で紐付け (例: Closes #N)
 
-    ## Rules
-    - 機密値 (token, key, password) を絶対にコミットしない
-    - issue のスコープに集中し、関係ない変更をしない
-    - 不明点があれば PR の本文に記載して人間にレビューを委ねる
+    - タイトル: 英語、変更の要約
+    - 本文: 日本語で以下を含める
+      - 変更の概要と理由
+      - 設計判断の根拠（複数の選択肢があった場合）
+      - `Closes #<N>`
+    - ビルドが通らない場合やスコープ外の課題がある場合はその旨を明記
+
+    ## 制約
+
+    - 機密値（token, key, password, connection string）を絶対にコミットしない
+    - Issue のスコープ外の変更をしない（リファクタリング、フォーマット修正、コメント追加など）
+    - 既存のコードスタイルに合わせる
+    - shared/ クレートの変更は全サービスに影響するため、既存の型を壊さないこと
+    - 新しい依存クレートの追加は必要最小限に留める
+
+    ## 判断に迷ったとき
+
+    - 要件が曖昧: 最もシンプルな解釈で実装し、判断の根拠を PR 本文に記載
+    - 依存 Issue が未完了: スタブやTODOコメントで境界を明示し、実装可能な範囲で進める
+    - 複数のアプローチがある: シンプルな方を選び、他の選択肢を PR 本文に記載
