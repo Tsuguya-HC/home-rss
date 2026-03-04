@@ -1,0 +1,49 @@
+name: Build and Push
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [server, ui, fetcher, cleaner]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: fermyon/actions/spin/setup@v1
+        with:
+          plugins: trigger-command
+
+      - name: Build ${{ matrix.service }}
+        run: cargo build --target wasm32-wasip1 --release -p home-rss-${{ matrix.service }}
+
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push ${{ matrix.service }} to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          spin registry push \
+            -f "${{ matrix.service }}/spin.toml" \
+            "ghcr.io/tsuguya/home-rss-${{ matrix.service }}:${{ github.ref_name }}"
