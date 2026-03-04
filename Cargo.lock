@@ -391,11 +391,13 @@ name = "home-rss-fetcher"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "feed-rs",
  "home-rss-shared",
  "serde",
  "serde_json",
  "spin-sdk",
+ "uuid",
 ]
 
 [[package]]
