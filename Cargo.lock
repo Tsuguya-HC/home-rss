@@ -394,8 +394,6 @@ dependencies = [
  "chrono",
  "feed-rs",
  "home-rss-shared",
- "serde",
- "serde_json",
  "spin-sdk",
 ]
 
