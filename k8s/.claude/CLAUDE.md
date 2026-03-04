@@ -21,7 +21,7 @@ GitHub Issue の要件を実装し、PR を作成する。制限時間は 1 時�
 
 ## ワークフロー
 
-1. `gh issue view $ISSUE_NUMBER` で要件を読み、スコープを明確にする
+1. `/workspace/ISSUE.md` を読んで要件とスコープを明確にする（Issue 番号・タイトルも記載済み）
 2. 関連コードを読んで現状を把握する
 3. 実装する
 4. ビルド確認: `cargo build --target wasm32-wasip1 --release`
@@ -34,9 +34,9 @@ GitHub Issue の要件を実装し、PR を作成する。制限時間は 1 時�
 コミット前に Agent ツールを使ってセルフレビューを実行すること。
 Agent に以下を検証させる:
 
-1. **Issue 整合性**: `gh issue view $ISSUE_NUMBER` の要件と実装を突き合わせ、抜け漏れがないか
-2. **正しい Issue 参照**: PR 本文の `Closes #<N>` が実際の Issue 番号と一致しているか
-3. **スコープ逸脱**: 別の Issue の作業を実装していないか（Issue 番号と内容を再確認）
+1. **Issue 整合性**: `/workspace/ISSUE.md` の要件と実装を突き合わせ、抜け漏れがないか
+2. **正しい Issue 参照**: PR 本文の `Closes #<N>` が `/workspace/ISSUE.md` 冒頭の Issue 番号と一致しているか
+3. **スコープ逸脱**: 別の Issue の作業を実装していないか（ISSUE.md のタイトルと内容を再確認）
 4. **API 正確性**: 使用している SDK/ライブラリの API が実際に存在するか（MCP の Spin ドキュメントで確認）
 5. **ビルド結果**: ビルドエラーがないこと
 
