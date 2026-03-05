@@ -181,6 +181,122 @@ fn hex_digit(b: u8) -> Option<u8> {
     }
 }
 
+fn sanitize_html(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    let bytes = input.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            let tag_start = i + 1;
+            let tag_end = match input[tag_start..].find('>') {
+                Some(p) => tag_start + p,
+                None => {
+                    result.push_str(&esc(&input[i..]));
+                    break;
+                }
+            };
+            let tag_content = &input[tag_start..tag_end];
+            let tag_name = tag_content
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches('/')
+                .to_ascii_lowercase();
+            match tag_name.as_str() {
+                "script" | "style" | "iframe" | "object" | "embed" | "form" | "input"
+                | "textarea" | "button" | "select" => {
+                    if !tag_content.starts_with('/') {
+                        let close = format!("</{tag_name}>");
+                        let after = &input[tag_end + 1..];
+                        if let Some(end) = after.to_ascii_lowercase().find(&close) {
+                            i = tag_end + 1 + end + close.len();
+                        } else {
+                            i = tag_end + 1;
+                        }
+                    } else {
+                        i = tag_end + 1;
+                    }
+                }
+                _ => {
+                    let cleaned = remove_event_attrs(tag_content);
+                    result.push('<');
+                    result.push_str(&cleaned);
+                    result.push('>');
+                    i = tag_end + 1;
+                }
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
+fn remove_event_attrs(tag: &str) -> String {
+    let mut result = String::with_capacity(tag.len());
+    let mut i = 0;
+    let bytes = tag.as_bytes();
+    while i < bytes.len() {
+        if (i == 0 || bytes[i - 1].is_ascii_whitespace()) && i + 2 < bytes.len() {
+            let rest = &tag[i..];
+            let lower = rest.to_ascii_lowercase();
+            if lower.starts_with("on") && rest[2..].starts_with(|c: char| c.is_ascii_alphabetic())
+            {
+                if let Some(eq) = rest.find('=') {
+                    let after_eq = &rest[eq + 1..];
+                    let skip = if after_eq.starts_with('"') {
+                        after_eq[1..].find('"').map(|p| eq + 1 + 1 + p + 1)
+                    } else if after_eq.starts_with('\'') {
+                        after_eq[1..].find('\'').map(|p| eq + 1 + 1 + p + 1)
+                    } else {
+                        after_eq
+                            .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+                            .or(Some(after_eq.len()))
+                            .map(|p| eq + 1 + p)
+                    };
+                    if let Some(skip_len) = skip {
+                        i += skip_len;
+                        continue;
+                    }
+                }
+            }
+            if lower.starts_with("href")
+                && rest
+                    .get(4..)
+                    .and_then(|s| s.find('=').map(|p| &s[..=p]))
+                    .map(|s| s.trim().starts_with('='))
+                    .unwrap_or(false)
+            {
+                if let Some(eq) = rest.find('=') {
+                    let after_eq = rest[eq + 1..].trim_start();
+                    let val = if after_eq.starts_with('"') {
+                        after_eq[1..].find('"').map(|p| &after_eq[1..1 + p])
+                    } else if after_eq.starts_with('\'') {
+                        after_eq[1..].find('\'').map(|p| &after_eq[1..1 + p])
+                    } else {
+                        after_eq
+                            .find(|c: char| c.is_ascii_whitespace() || c == '>')
+                            .map(|p| &after_eq[..p])
+                    };
+                    if let Some(v) = val {
+                        let trimmed = v.trim().to_ascii_lowercase();
+                        if trimmed.starts_with("javascript:") || trimmed.starts_with("data:") {
+                            if let Some(skip) = rest.find(|c: char| c.is_ascii_whitespace()) {
+                                i += skip;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
 fn parse_form_body(body: &[u8]) -> std::collections::HashMap<String, String> {
     body.split(|&b| b == b'&')
         .filter_map(|pair| {
@@ -321,7 +437,7 @@ async fn index_page() -> Result<Response> {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>home-rss</title>
-  <script src="https://unpkg.com/htmx.org@2.0.4" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.4" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" crossorigin="anonymous"></script>
   <style>"##);
     html.push_str(CSS);
     html.push_str(r##"</style>
@@ -347,9 +463,10 @@ async fn index_page() -> Result<Response> {
   <form hx-post="/feeds"
         hx-target="#feed-nav"
         hx-swap="outerHTML"
-        hx-on:htmx:after-request="document.getElementById('add-feed-dialog').close(); this.reset()">
+        hx-on:htmx:after-request="if(event.detail.successful &amp;&amp; !event.detail.xhr.getResponseHeader('HX-Retarget')){document.getElementById('add-feed-dialog').close(); this.reset();}">
     <h2>Add Feed</h2>
     <input type="url" name="url" placeholder="https://example.com/feed.xml" required autocomplete="off">
+    <div id="add-feed-error"></div>
     <div class="dialog-actions">
       <button type="submit" class="btn btn-primary">Add</button>
       <button type="button" class="btn" onclick="document.getElementById('add-feed-dialog').close()">Cancel</button>
@@ -450,7 +567,7 @@ async fn partial_article(id: &str) -> Result<Response> {
     let content_html = article
         .content
         .as_deref()
-        .map(|c| format!("<div class=\"article-content\">{c}</div>"))
+        .map(|c| format!("<div class=\"article-content\">{}</div>", sanitize_html(c)))
         .unwrap_or_else(|| "<p class=\"empty\">No content available.</p>".to_string());
 
     let author = article.author.as_deref().unwrap_or("");
@@ -505,22 +622,37 @@ async fn partial_stats() -> Result<Response> {
     ))
 }
 
+fn html_err_retarget(msg: &str, target: &str) -> Result<Response> {
+    Ok(Response::builder()
+        .status(200)
+        .header("content-type", "text/html; charset=utf-8")
+        .header("HX-Retarget", target)
+        .header("HX-Reswap", "innerHTML")
+        .body(format!("<div class=\"alert-error\">{}</div>", esc(msg)))
+        .build())
+}
+
 async fn add_feed(req: &Request) -> Result<Response> {
     let params = parse_form_body(req.body());
     let url = match params.get("url") {
         Some(u) if !u.is_empty() => u.clone(),
-        _ => return html_err("URL is required"),
+        _ => return html_err_retarget("URL is required", "#add-feed-error"),
     };
 
     let json = format!(r#"{{"url":{}}}"#, serde_json::to_string(&url)?);
     let resp = match api_post_raw("/api/feeds", json.into_bytes(), "application/json").await {
         Ok(r) => r,
-        Err(e) => return html_err(&format!("Failed to add feed: {e}")),
+        Err(e) => {
+            return html_err_retarget(
+                &format!("Failed to add feed: {e}"),
+                "#add-feed-error",
+            )
+        }
     };
 
     if *resp.status() >= 400 {
         let msg = String::from_utf8_lossy(resp.into_body().as_slice()).to_string();
-        return html_err(&format!("Server error: {msg}"));
+        return html_err_retarget(&format!("Server error: {msg}"), "#add-feed-error");
     }
 
     partial_feeds().await
