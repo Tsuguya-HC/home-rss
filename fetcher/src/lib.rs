@@ -2,13 +2,18 @@ use anyhow::Result;
 use chrono::NaiveDateTime;
 use feed_rs::parser;
 use home_rss_shared::db;
-use spin_sdk::http::{send, Method, Request, Response};
+use spin_sdk::http::{send, IntoResponse, Method, Request, Response};
+use spin_sdk::http_component;
 use spin_sdk::pg4::{Connection, Decode};
 
-fn main() {
-    if let Err(e) = spin_sdk::http::run(fetch_all_feeds()) {
-        eprintln!("fetcher error: {e:#}");
-        std::process::exit(1);
+#[http_component]
+async fn handle_fetch(_req: Request) -> Result<impl IntoResponse> {
+    match fetch_all_feeds().await {
+        Ok(()) => Ok(Response::new(200, "ok")),
+        Err(e) => {
+            eprintln!("fetcher error: {e:#}");
+            Ok(Response::new(500, format!("error: {e:#}")))
+        }
     }
 }
 

@@ -8,7 +8,8 @@ version = "0.1.0"
 db_url = { required = true }
 retention_days = { default = "30" }
 
-[[trigger.command]]
+[[trigger.http]]
+route = "/clean"
 component = "cleaner"
 
 [component.cleaner]

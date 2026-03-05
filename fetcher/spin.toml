@@ -7,7 +7,8 @@ version = "0.1.0"
 [variables]
 db_url = { required = true }
 
-[[trigger.command]]
+[[trigger.http]]
+route = "/fetch"
 component = "fetcher"
 
 [component.fetcher]
