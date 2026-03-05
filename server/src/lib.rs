@@ -226,8 +226,8 @@ fn mark_all_read(_req: Request, _params: Params) -> Result<Response> {
     let conn = db::connect()?;
     conn.execute(
         "INSERT INTO read_status (article_id) \
-         SELECT id FROM articles \
-         WHERE id NOT IN (SELECT article_id FROM read_status) \
+         SELECT id FROM articles a \
+         WHERE NOT EXISTS (SELECT 1 FROM read_status rs WHERE rs.article_id = a.id) \
          ON CONFLICT DO NOTHING",
         &[],
     )?;
@@ -243,13 +243,12 @@ fn import_opml(req: Request, _params: Params) -> Result<Response> {
     }
 
     let conn = db::connect()?;
-    let mut imported = 0u32;
+    let mut imported = 0u64;
     for url in &urls {
-        conn.execute(
+        imported += conn.execute(
             "INSERT INTO feeds (url) VALUES ($1) ON CONFLICT (url) DO NOTHING",
             &[ParameterValue::Str(url.clone())],
         )?;
-        imported += 1;
     }
 
     json_ok(format!(r#"{{"imported":{imported}}}"#))
@@ -291,8 +290,8 @@ fn get_stats(_req: Request, _params: Params) -> Result<Response> {
     let result = conn.query(
         "SELECT \
          (SELECT COUNT(*)::bigint FROM feeds) AS feeds, \
-         (SELECT COUNT(*)::bigint FROM articles \
-          WHERE id NOT IN (SELECT article_id FROM read_status)) AS unread",
+         (SELECT COUNT(*)::bigint FROM articles a \
+          WHERE NOT EXISTS (SELECT 1 FROM read_status rs WHERE rs.article_id = a.id)) AS unread",
         &[],
     )?;
 
