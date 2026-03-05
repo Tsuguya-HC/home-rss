@@ -6,6 +6,7 @@ version = "0.1.0"
 
 [variables]
 db_url = { required = true }
+retention_days = { default = "30" }
 
 [[trigger.command]]
 component = "cleaner"
@@ -15,6 +16,7 @@ source = "../target/wasm32-wasip1/release/home-rss-cleaner.wasm"
 allowed_outbound_hosts = ["postgres://*:5432"]
 [component.cleaner.variables]
 db_url = "{{ db_url }}"
+retention_days = "{{ retention_days }}"
 [component.cleaner.build]
 command = "cargo build --target wasm32-wasip1 --release -p home-rss-cleaner"
 workdir = ".."
