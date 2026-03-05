@@ -30,12 +30,12 @@ permissions:
   packages: write
 
 jobs:
-  build:
+  build-rust:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        service: [server, ui, fetcher, cleaner]
+        service: [server, fetcher, cleaner]
     steps:
       - uses: actions/checkout@v6
 
@@ -66,3 +66,41 @@ jobs:
           spin registry push \
             -f "${{ matrix.service }}/spin.toml" \
             "ghcr.io/tsuguya/home-rss-${{ matrix.service }}:${{ github.ref_name }}"
+
+  build-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - uses: fermyon/actions/spin/setup@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build UI
+        working-directory: ui
+        run: pnpm install && pnpm run build
+
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push ui to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          spin registry push \
+            -f "ui/spin.toml" \
+            "ghcr.io/tsuguya/home-rss-ui:${{ github.ref_name }}"
