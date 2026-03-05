@@ -1,5 +1,5 @@
 [workspace]
-members = ["server", "ui", "fetcher", "cleaner", "shared"]
+members = ["server", "fetcher", "cleaner", "shared"]
 resolver = "2"
 
 [workspace.dependencies]

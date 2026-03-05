@@ -9,8 +9,12 @@ route = "/..."
 component = "ui"
 
 [component.ui]
-source = "../target/wasm32-wasip1/release/home_rss_ui.wasm"
-allowed_outbound_hosts = []
+source = { url = "https://github.com/spinframework/spin-fileserver/releases/download/v0.3.0/spin_static_fs.wasm", digest = "sha256:ef88708817e107bf49985c7cefe4dd1f199bf26f6727819183d5c996baa3d148" }
+files = [{ source = "dist/", destination = "/" }]
+
+[component.ui.environment]
+FALLBACK_PAGE = "/index.html"
+
 [component.ui.build]
-command = "cargo build --target wasm32-wasip1 --release -p home-rss-ui"
-workdir = ".."
+command = "pnpm install && pnpm run build"
+workdir = "."
