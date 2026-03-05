@@ -1,3 +1,4 @@
+-- migrate:up
 CREATE TABLE feeds (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   url TEXT NOT NULL UNIQUE,
@@ -26,3 +27,8 @@ CREATE TABLE read_status (
   read_at TIMESTAMPTZ DEFAULT now(),
   PRIMARY KEY (article_id)
 );
+
+-- migrate:down
+DROP TABLE IF EXISTS read_status;
+DROP TABLE IF EXISTS articles;
+DROP TABLE IF EXISTS feeds;

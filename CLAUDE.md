@@ -61,6 +61,20 @@ cd fetcher && spin build && spin up  # 即時実行して終了
 cargo build --target wasm32-wasip1 --release  # or spin build
 ```
 
+### マイグレーション
+
+[dbmate](https://github.com/amacneil/dbmate) で管理。ファイルは `migrations/` に `YYYYMMDDHHMMSS_name.sql` 形式で配置。
+
+```bash
+# 新しいマイグレーション作成
+dbmate new add_some_column
+
+# ローカルで実行
+dbmate --url "postgres://user:pass@localhost:5432/rssreader?sslmode=disable" up
+```
+
+本番では ArgoCD PreSync Hook Job (home-cluster 側) が `dbmate up` を実行する。
+
 ### 並列開発
 
 worktree を切って server/ui/fetcher/cleaner を並列セッションで開発可能。
