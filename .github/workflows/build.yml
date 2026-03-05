@@ -2,17 +2,7 @@ name: Build and Push
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-    paths:
-      - "server/**"
-      - "ui/**"
-      - "fetcher/**"
-      - "cleaner/**"
-      - "shared/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/build.yml"
   pull_request:
     branches: [main]
     paths:
