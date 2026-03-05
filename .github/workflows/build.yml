@@ -46,6 +46,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - uses: fermyon/actions/spin/setup@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build ${{ matrix.service }}
         run: cargo build --target wasm32-wasip1 --release -p home-rss-${{ matrix.service }}
