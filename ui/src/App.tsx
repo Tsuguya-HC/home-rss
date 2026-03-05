@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import DOMPurify from 'dompurify'
 import { Feed, Article } from './types'
 import { api } from './api'
 
@@ -485,7 +486,7 @@ function ArticleDetail({ article, onBack }: ArticleDetailProps) {
         {article.content ? (
           <div
             className="detail-content"
-            dangerouslySetInnerHTML={{ __html: article.content }}
+            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(article.content) }}
           />
         ) : (
           <div className="detail-no-content">

@@ -46,6 +46,7 @@ export const api = {
   importOpml: (file: File) =>
     request<{ imported: number }>('/api/import/opml', {
       method: 'POST',
+      headers: { 'Content-Type': 'application/xml' },
       body: file,
     }),
 
