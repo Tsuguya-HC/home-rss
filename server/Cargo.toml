@@ -12,3 +12,4 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 home-rss-shared = { path = "../shared" }
+quick-xml = { workspace = true }
