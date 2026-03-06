@@ -12,7 +12,7 @@ route = "/fetch"
 component = "fetcher"
 
 [component.fetcher]
-source = "../target/wasm32-wasip1/release/home-rss-fetcher.wasm"
+source = "../target/wasm32-wasip1/release/home_rss_fetcher.wasm"
 allowed_outbound_hosts = ["postgres://*:5432", "https://*:443", "http://*:80"]
 [component.fetcher.variables]
 db_url = "{{ db_url }}"

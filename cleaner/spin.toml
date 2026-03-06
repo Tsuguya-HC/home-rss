@@ -13,7 +13,7 @@ route = "/clean"
 component = "cleaner"
 
 [component.cleaner]
-source = "../target/wasm32-wasip1/release/home-rss-cleaner.wasm"
+source = "../target/wasm32-wasip1/release/home_rss_cleaner.wasm"
 allowed_outbound_hosts = ["postgres://*:5432"]
 [component.cleaner.variables]
 db_url = "{{ db_url }}"
