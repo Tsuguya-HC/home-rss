@@ -13,3 +13,6 @@ minimumReleaseAge: 4320
 # its platform binary, so vite cannot build without it.
 onlyBuiltDependencies:
   - esbuild
+minimumReleaseAgeExclude:
+  # Renovate security update: dompurify@3.4.13
+  - dompurify@3.4.13
