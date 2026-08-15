@@ -1,0 +1,7 @@
+# Refuse to resolve any version published less than 3 days ago (pnpm >= 10.16,
+# value in minutes). Renovate's own minimumReleaseAge cannot cover a lock-file
+# refresh — there is no single release to date, every transitive dependency
+# just jumps to whatever satisfies the range — so the cooldown has to be
+# enforced here, at resolution time, where it applies to every package in the
+# tree.
+minimumReleaseAge: 4320

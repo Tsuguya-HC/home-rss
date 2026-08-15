@@ -5,6 +5,9 @@
     "helpers:pinGitHubActionDigests"
   ],
   "minimumReleaseAge": "3 days",
+  "constraints": {
+    "pnpm": ">=10.16.0"
+  },
   "osvVulnerabilityAlerts": true,
   "vulnerabilityAlerts": {
     "description": "Security updates get a shorter soak, not none. Waiting the full 3 days on a known CVE is its own risk, but merging a release published minutes ago — unattended, straight into the cluster — is exactly the case the age gate exists for: a poisoned release is least likely to have been noticed while it is brand new. Most advisory fix versions are already older than this by the time the advisory lands, so in practice this delays almost nothing.",
@@ -16,7 +19,7 @@
     "description": "Most open alerts are transitive dependencies in ui/pnpm-lock.yaml and Cargo.lock, which no direct-dependency bump reaches. Automerged because the build-rust and build-ui jobs compile from the refreshed lock files.",
     "enabled": true,
     "schedule": ["before 6am on monday"],
-    "automerge": false
+    "automerge": true
   },
   "packageRules": [
     {
