@@ -5,6 +5,19 @@
     "helpers:pinGitHubActionDigests"
   ],
   "minimumReleaseAge": "3 days",
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "description": "A published CVE is a present risk; the cooldown exists to catch a hypothetical compromised release. Security updates therefore skip the age gate and the schedule.",
+    "minimumReleaseAge": null,
+    "schedule": ["at any time"],
+    "labels": ["security"]
+  },
+  "lockFileMaintenance": {
+    "description": "Most open alerts are transitive dependencies in ui/pnpm-lock.yaml and Cargo.lock, which no direct-dependency bump reaches. Automerged because the build-rust and build-ui jobs compile from the refreshed lock files.",
+    "enabled": true,
+    "schedule": ["before 6am on monday"],
+    "automerge": true
+  },
   "packageRules": [
     {
       "matchUpdateTypes": ["patch", "minor"],
