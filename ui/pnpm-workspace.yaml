@@ -5,3 +5,11 @@
 # enforced here, at resolution time, where it applies to every package in the
 # tree.
 minimumReleaseAge: 4320
+
+# pnpm 10+ refuses to run a dependency's install scripts unless it is listed
+# here, and pnpm 11 turns that from a warning into ERR_PNPM_IGNORED_BUILDS —
+# which is what has been failing build-ui (and therefore every open PR) since
+# the action's `version: latest` rolled forward. esbuild's postinstall fetches
+# its platform binary, so vite cannot build without it.
+onlyBuiltDependencies:
+  - esbuild
