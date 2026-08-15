@@ -95,3 +95,33 @@ jobs:
           spin registry push \
             -f "ui/spin.toml" \
             "ghcr.io/tsuguya/home-rss-ui:${{ github.ref_name }}"
+
+  # The only required status check. Aggregates every correctness leaf so the
+  # ruleset never names an individual job: build-rust is a matrix, so its real
+  # check names are "build-rust (server)" etc. and naming them in the ruleset
+  # breaks the moment the matrix changes (a required context that is never
+  # reported blocks the PR forever).
+  gate:
+    name: CI Gate
+    needs: [build-rust, build-ui]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Aggregate results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "Results: ${RESULTS}"
+          # fail-closed: an empty needs list would make the loop pass vacuously
+          if [ -z "${RESULTS// /}" ]; then
+            echo "::error::No job results to aggregate (empty needs) — failing closed."
+            exit 1
+          fi
+          for r in ${RESULTS}; do
+            case "${r}" in
+              success|skipped) ;;
+              *) echo "::error::A required job concluded with: ${r}"; exit 1 ;;
+            esac
+          done
