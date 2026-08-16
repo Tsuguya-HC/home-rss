@@ -16,3 +16,5 @@ onlyBuiltDependencies:
 minimumReleaseAgeExclude:
   # Renovate security update: dompurify@3.4.13
   - dompurify@3.4.13
+  # Renovate security update: pnpm@10.34.4
+  - pnpm@10.34.4

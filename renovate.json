@@ -7,7 +7,7 @@
   ],
   "minimumReleaseAge": "3 days",
   "constraints": {
-    "pnpm": ">=10.16.0"
+    "pnpm": ">=10.34.4"
   },
   "osvVulnerabilityAlerts": true,
   "vulnerabilityAlerts": {
