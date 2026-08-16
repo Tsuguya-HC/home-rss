@@ -14,27 +14,41 @@ on:
       - "shared/**"
       - "Cargo.toml"
       - "Cargo.lock"
-      - ".github/workflows/build.yml"
+      # Any workflow file, not just this one — the actionlint and zizmor jobs
+      # below audit every workflow in the repo, so a new one has to trigger them.
+      - ".github/workflows/**"
 
-permissions:
-  contents: read
-  packages: write
+# `packages: write` used to be granted here, which handed it to every job
+# including the gate. Only the two jobs that actually push to GHCR ask for it.
+permissions: {}
 
 jobs:
   build-rust:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # spin registry push → ghcr.io
     strategy:
       fail-fast: false
       matrix:
         service: [server, fetcher, cleaner]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           targets: wasm32-wasip1
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Flagged because this workflow also publishes on tag pushes. Actions
+      # caches are scoped per branch: a PR's cache is readable only by that PR's
+      # own runs, and a tag build falls back to the default branch's scope. So
+      # poisoning the release build means writing to main's cache scope, which
+      # needs push access to main — not something a PR can reach. Splitting the
+      # tag build into its own cache-free workflow is the structural fix if this
+      # ever stops being true.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2 # zizmor: ignore[cache-poisoning]
 
       - uses: fermyon/actions/spin/setup@8849a6c41270af8e9f60f371982eddf33b8e35c9 # v1.0.12
         with:
@@ -51,17 +65,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The tag name reaches the shell as an environment variable, not as a
+      # `${{ }}` expansion inside the script: a ref name is attacker-chosen text
+      # and expanding it inline splices it into the command.
       - name: Push ${{ matrix.service }} to GHCR
         if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          SERVICE: ${{ matrix.service }}
+          TAG: ${{ github.ref_name }}
         run: |
           spin registry push \
-            -f "${{ matrix.service }}/spin.toml" \
-            "ghcr.io/tsuguya/home-rss-${{ matrix.service }}:${{ github.ref_name }}"
+            -f "${SERVICE}/spin.toml" \
+            "ghcr.io/tsuguya/home-rss-${SERVICE}:${TAG}"
 
   build-ui:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # spin registry push → ghcr.io
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       # No `version:` — the action reads ui/package.json's packageManager field,
       # so the pnpm CI runs on is pinned and Renovate proposes bumps as PRs.
@@ -71,7 +96,8 @@ jobs:
         with:
           package_json_file: ui/package.json
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      # Same reasoning as the Rust cache in build-rust above.
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0 # zizmor: ignore[cache-poisoning]
         with:
           node-version: 24
           cache: pnpm
@@ -95,10 +121,70 @@ jobs:
 
       - name: Push ui to GHCR
         if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           spin registry push \
             -f "ui/spin.toml" \
-            "ghcr.io/tsuguya/home-rss-ui:${{ github.ref_name }}"
+            "ghcr.io/tsuguya/home-rss-ui:${TAG}"
+
+  # Checks the workflow expressions and job graph, and shells out to shellcheck
+  # for every `run:` block. Pinned and checksummed rather than pulled from the
+  # release page's `latest`.
+  actionlint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        env:
+          # renovate: datasource=github-releases depName=rhysd/actionlint
+          ACTIONLINT_VERSION: "1.7.12"
+        run: |
+          set -euo pipefail
+          base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+          curl -fsSL "$base/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -o actionlint.tar.gz
+          curl -fsSL "$base/actionlint_${ACTIONLINT_VERSION}_checksums.txt" -o checksums.txt
+          grep " actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz\$" checksums.txt | sha256sum -c -
+          sudo tar xzf actionlint.tar.gz -C /usr/local/bin actionlint
+          actionlint --version
+
+      - name: Lint workflows
+        run: |
+          set -euo pipefail
+          # actionlint silently skips its shell checks when shellcheck is
+          # absent, which would quietly reduce this job to expression linting
+          # if the runner image ever drops it.
+          command -v shellcheck >/dev/null || {
+            echo "::error::shellcheck is not on the runner; actionlint would skip every run: block"
+            exit 1
+          }
+          actionlint -no-color
+
+  # Static audit of the workflows themselves: template injection, credential
+  # persistence, permission scope, cache poisoning. This workflow publishes the
+  # images the cluster runs, so it is the one most worth auditing.
+  zizmor:
+    runs-on: ubuntu-latest
+    # This repo is private and has no Advanced Security, so there is nowhere to
+    # upload SARIF to; findings surface as job annotations instead and the job
+    # needs no token at all.
+    permissions: {}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          # renovate: datasource=github-releases depName=zizmorcore/zizmor
+          version: "1.29.0"
+          advanced-security: false
+          annotations: true
 
   # The only required status check. Aggregates every correctness leaf so the
   # ruleset never names an individual job: build-rust is a matrix, so its real
@@ -107,7 +193,7 @@ jobs:
   # reported blocks the PR forever).
   gate:
     name: CI Gate
-    needs: [build-rust, build-ui]
+    needs: [build-rust, build-ui, actionlint, zizmor]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions: {}
