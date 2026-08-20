@@ -130,61 +130,15 @@ jobs:
 
   # Checks the workflow expressions and job graph, and shells out to shellcheck
   # for every `run:` block.
-  actionlint:
-    runs-on: ubuntu-latest
+  # ワークフローの lint は 6 リポジトリ共通なので home-actions に寄せてある。
+  # ツールのピンは向こう側にあり、ここは呼び先の SHA を追うだけ。
+  lint-workflows:
+    uses: Tsuguya/home-actions/.github/workflows/lint-workflows.yml@86d1f1b663cdfcb599170c1b3a7f84b6c1e2fe00 # v0
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - uses: aquaproj/aqua-installer@96a9bc20066c5bf5e275b41019cfc165b25f4e2e # v4.0.5
-        with:
-          aqua_version: v2.62.3
-
-      - name: Lint workflows
-        run: |
-          set -euo pipefail
-          # actionlint silently skips its shell checks when shellcheck is
-          # absent, which would quietly reduce this job to expression linting
-          # if the runner image ever drops it.
-          command -v shellcheck >/dev/null || {
-            echo "::error::shellcheck is not on the runner; actionlint would skip every run: block"
-            exit 1
-          }
-          actionlint -no-color
-
-  # Static audit of the workflows themselves: template injection, credential
-  # persistence, permission scope, cache poisoning. This workflow publishes the
-  # images the cluster runs, so it is the one most worth auditing.
-  zizmor:
-    runs-on: ubuntu-latest
-    # This repo is private and has no Advanced Security, so there is nowhere to
-    # upload SARIF to; findings surface as job annotations instead. `contents:
-    # read` is still needed — a private repo cannot be cloned without it.
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
-        with:
-          # renovate: datasource=github-releases depName=zizmorcore/zizmor
-          version: "1.29.0"
-          advanced-security: false
-          annotations: true
-
-  # The only required status check. Aggregates every correctness leaf so the
-  # ruleset never names an individual job: build-rust is a matrix, so its real
-  # check names are "build-rust (server)" etc. and naming them in the ruleset
-  # breaks the moment the matrix changes (a required context that is never
-  # reported blocks the PR forever).
   gate:
     name: CI Gate
-    needs: [build-rust, build-ui, actionlint, zizmor]
+    needs: [build-rust, build-ui, lint-workflows]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions: {}
