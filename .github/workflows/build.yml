@@ -148,7 +148,7 @@ jobs:
   # ワークフローの lint は 6 リポジトリ共通なので home-actions に寄せてある。
   # ツールのピンは向こう側にあり、ここは呼び先の SHA を追うだけ。
   lint-workflows:
-    uses: Tsuguya/home-actions/.github/workflows/lint-workflows.yml@567faff4ba360c1d0f4d852460172f8e2071f5b6 # v0
+    uses: Tsuguya/home-actions/.github/workflows/lint-workflows.yml@3064ee406bba7318e489e8d2d1af270e943fdd50 # v0
     permissions:
       contents: read
   gate:
