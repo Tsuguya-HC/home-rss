@@ -17,6 +17,11 @@ on:
       # Any workflow file, not just this one — the actionlint and zizmor jobs
       # below audit every workflow in the repo, so a new one has to trigger them.
       - ".github/workflows/**"
+      # Same reason for the Renovate config: lint-renovate validates it, and
+      # `CI Gate` is a required check. Without this line a Renovate-only PR
+      # starts no run at all, nothing reports, and the PR is blocked forever
+      # on "Waiting for status to be reported".
+      - "renovate.json*"
 
 # `packages: write` used to be granted here, which handed it to every job
 # including the gate. Only the two jobs that actually push to GHCR ask for it.
@@ -151,9 +156,17 @@ jobs:
     uses: Tsuguya/home-actions/.github/workflows/lint-workflows.yml@3064ee406bba7318e489e8d2d1af270e943fdd50 # v0
     permissions:
       contents: read
+
+  # Renovate 設定の検証。Renovate は知らないキーを黙って捨てるので（PR も警告も
+  # 出ない）、バリデータだけがこの層の間違いを検出できる。home-cluster は
+  # `ignoredAuthors` の綴り違いを 5 週間放置していた。
+  lint-renovate:
+    uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@2e7f65a9ac3492f91652e2cbd4e267202b5dabfd # v0
+    permissions:
+      contents: read
   gate:
     name: CI Gate
-    needs: [build-rust, build-ui, lint-workflows]
+    needs: [build-rust, build-ui, lint-workflows, lint-renovate]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions: {}
