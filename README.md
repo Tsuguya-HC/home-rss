@@ -4,9 +4,9 @@ Spin (WebAssembly) で構築するカスタム RSS リーダー。SpinKube 経�
 
 ## アーキテクチャ
 
-- **Runtime**: Spin 3.x (WebAssembly) on SpinKube
-- **言語**: Rust → wasm32-wasip1
-- **DB**: PostgreSQL (CNPG shared-pg)
+- **Runtime**: Spin 4.x (WebAssembly) on SpinKube (containerd-shim-spin v0.25.1+)
+- **言語**: Rust → wasm32-wasip1 (spin-sdk 6.x / WASI 0.3)
+- **DB**: PostgreSQL (CNPG `rss-pg`) — TLS 必須、CA は変数 `db_ca_root` で注入
 - **認証**: Kanidm OIDC via oauth2-proxy
 - **デプロイ**: ArgoCD GitOps
 

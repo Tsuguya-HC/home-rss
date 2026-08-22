@@ -39,9 +39,9 @@ Cargo workspace で `shared` クレートを共有。各サービスは独立し
 ## 技術スタック
 
 - **言語**: Rust → wasm32-wasip1
-- **フレームワーク**: Spin SDK (HTTP, PostgreSQL, outbound HTTP)
+- **フレームワーク**: spin-sdk 6.x (HTTP, PostgreSQL, outbound HTTP) — WASI 0.3 ベースで全 API が async
 - **UI**: HTMX + spin-fileserver
-- **DB**: PostgreSQL (CNPG shared-pg, `rssreader` DB)
+- **DB**: PostgreSQL (CNPG `rss-pg`, `rssreader` DB) — TLS 検証あり
 - **認証**: Kanidm OIDC via oauth2-proxy
 - **ランタイム**: SpinKube (containerd-shim-spin on Talos)
 - **CI**: GitHub Actions (`spin build` → `spin registry push`)
@@ -98,3 +98,26 @@ Issue はフェーズとリポジトリのラベルで分類:
 - **PUBLIC リポジトリではない** — private だが、機密値はコミットしない習慣を維持
 - Spin の cron trigger は SpinKube 非対応 → command trigger + K8s CronJob を使う
 - Spin SDK の PostgreSQL データ型サポートを事前に確認すること (UUID, TIMESTAMPTZ 等)
+
+### spin-sdk 6.x への移行で踏んだところ
+
+- `pg4` / `pg3` モジュールは廃止され `spin_sdk::pg` に一本化。`variables::get` /
+  `Connection::open` / `query` / `execute` は**すべて async**
+- `#[http_component]` → `#[http_service]`。**`Router` と `Params` は削除された**ので
+  ルーティングは自前（`server/src/lib.rs` の `route()` が method × path セグメントで分岐）
+- `Request` / `Response` は hyperium (`http` crate) の型。body は
+  `req.into_body().bytes().await?` で読む（`IncomingBodyExt`）
+- `QueryResult` はストリーム。`.collect().await?` で `Vec<Row>` を得る
+
+### PostgreSQL TLS
+
+`db_url` の **`sslmode` に `verify-ca` / `verify-full` は指定できない**
+（`invalid value for option sslmode` でパースが落ちる）。`require` を使う。
+
+`require` でも Spin は常に完全な証明書検証を行う（実測: 正しい CA → ホスト名検証まで到達、
+誤った CA → `self-signed certificate in certificate chain` で拒否）。したがって
+**`sslmode=require` + `db_ca_root` で verify-full 相当**になる。
+
+CA は `rss-pg-ca` secret の `ca.crt` を SpinApp 変数 `db_ca_root` に注入する
+（`shared/src/db.rs` が `Certificate::Text` として `set_ca_root` に渡す）。
+接続先は証明書 SAN に載っている名前を使うこと（`rss-pg-rw.rss.svc.cluster.local`）。
