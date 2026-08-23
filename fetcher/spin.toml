@@ -14,7 +14,11 @@ component = "fetcher"
 
 [component.fetcher]
 source = "../target/wasm32-wasip1/release/home_rss_fetcher.wasm"
-allowed_outbound_hosts = ["postgres://*:5432", "https://*:443", "http://*:80"]
+# HTTPS only. The CiliumNetworkPolicy in home-cluster opens world:443 and
+# nothing else, so a plaintext feed would hang rather than fail, and an
+# article body fetched over a channel anyone can rewrite ends up rendered
+# in the UI.
+allowed_outbound_hosts = ["postgres://*:5432", "https://*:443"]
 [component.fetcher.variables]
 db_url = "{{ db_url }}"
 db_ca_root = "{{ db_ca_root }}"
