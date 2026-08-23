@@ -144,8 +144,8 @@ async fn delete_feed(id: &str) -> Result<Resp> {
     let conn = db::connect().await?;
     let rows = conn
         .execute(
-            "DELETE FROM feeds WHERE id = $1::uuid",
-            vec![ParameterValue::Str(id.to_owned())],
+            "DELETE FROM feeds WHERE id = $1",
+            vec![ParameterValue::Uuid(id.to_owned())],
         )
         .await?;
 
@@ -171,18 +171,18 @@ async fn list_articles(query: &str) -> Result<Resp> {
             format!(
                 "{ARTICLE_SELECT} \
                  LEFT JOIN read_status rs ON a.id = rs.article_id \
-                 WHERE a.feed_id = $1::uuid AND rs.article_id IS NULL \
+                 WHERE a.feed_id = $1 AND rs.article_id IS NULL \
                  ORDER BY a.published_at DESC NULLS LAST"
             ),
-            vec![ParameterValue::Str(fid)],
+            vec![ParameterValue::Uuid(fid)],
         ),
         (Some(fid), false) => (
             format!(
                 "{ARTICLE_SELECT} \
-                 WHERE a.feed_id = $1::uuid \
+                 WHERE a.feed_id = $1 \
                  ORDER BY a.published_at DESC NULLS LAST"
             ),
-            vec![ParameterValue::Str(fid)],
+            vec![ParameterValue::Uuid(fid)],
         ),
         (None, true) => (
             format!(
@@ -207,8 +207,8 @@ async fn list_articles(query: &str) -> Result<Resp> {
 async fn mark_read(id: &str) -> Result<Resp> {
     let conn = db::connect().await?;
     conn.execute(
-        "INSERT INTO read_status (article_id) VALUES ($1::uuid) ON CONFLICT DO NOTHING",
-        vec![ParameterValue::Str(id.to_owned())],
+        "INSERT INTO read_status (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        vec![ParameterValue::Uuid(id.to_owned())],
     )
     .await?;
 

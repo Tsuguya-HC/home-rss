@@ -6,7 +6,7 @@ use home_rss_shared::http::{Resp, text};
 use spin_sdk::http::body::IncomingBodyExt;
 use spin_sdk::http::{EmptyBody, Request, Response, StatusCode, send};
 use spin_sdk::http_service;
-use spin_sdk::pg::{Connection, Decode};
+use spin_sdk::pg::{Connection, Decode, ParameterValue};
 
 #[http_service]
 async fn handle_fetch(_req: Request) -> Resp {
@@ -101,9 +101,9 @@ async fn process_feed(
 
         conn.execute(
             "INSERT INTO articles (feed_id, url, title, content, author, published_at) \
-             VALUES ($1::uuid, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
             vec![
-                feed_id.to_owned().into(),
+                ParameterValue::Uuid(feed_id.to_owned()),
                 entry_url.to_owned().into(),
                 entry_title.to_owned().into(),
                 content.map(str::to_owned).into(),
@@ -116,13 +116,13 @@ async fn process_feed(
 
     conn.execute(
         "UPDATE feeds SET title = $1, site_url = $2, etag = $3, last_modified = $4, \
-         last_fetched_at = NOW() WHERE id = $5::uuid",
+         last_fetched_at = NOW() WHERE id = $5",
         vec![
             feed_title.into(),
             site_url.into(),
             new_etag.into(),
             new_last_modified.into(),
-            feed_id.to_owned().into(),
+            ParameterValue::Uuid(feed_id.to_owned()),
         ],
     )
     .await?;
