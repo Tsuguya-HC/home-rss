@@ -111,6 +111,10 @@ Issue はフェーズとリポジトリのラベルで分類:
 - `Request` / `Response` は hyperium (`http` crate) の型。body は
   `req.into_body().bytes().await?` で読む（`IncomingBodyExt`）
 - `QueryResult` はストリーム。`.collect().await?` で `Vec<Row>` を得る
+- **UUID 列には `ParameterValue::Uuid` を渡す。** `$1::uuid` と書いて `Str` を渡す形は
+  通らない（`WrongType { postgres: Uuid, rust: "String" }`）。キャストが付くと
+  PostgreSQL はそのパラメータを uuid 型と推論するため。読み取り側の `SELECT id::text`
+  は逆向きなのでそのままでよい
 
 ### PostgreSQL TLS
 
