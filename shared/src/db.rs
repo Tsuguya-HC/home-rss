@@ -33,7 +33,7 @@ fn force_sslmode_require(url: &str) -> String {
 
     let kept: Vec<&str> = query
         .split('&')
-        .filter(|p| !p.is_empty() && !p.split_once('=').is_some_and(|(k, _)| k == "sslmode"))
+        .filter(|p| !p.is_empty() && p.split_once('=').is_none_or(|(k, _)| k != "sslmode"))
         .collect();
 
     if kept.is_empty() {
