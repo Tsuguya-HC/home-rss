@@ -19,6 +19,21 @@ Spin (WebAssembly) で構築するカスタム RSS リーダー。SpinKube 経�
 | fetcher | command | フィード収集 | CronJob |
 | cleaner | command | 古い記事削除 | CronJob |
 
+## API エンドポイント
+
+`server` (REST API) が提供するエンドポイント一覧。実装は `server/src/lib.rs` の `route()`。
+
+| メソッド | パス | 説明 |
+|---------|------|------|
+| GET | `/api/feeds` | フィード一覧を取得 |
+| POST | `/api/feeds` | フィードを追加（body: `{"url": string}`）。URL が既存の場合は既存レコードを返す |
+| DELETE | `/api/feeds/:id` | フィードを削除 |
+| GET | `/api/articles` | 記事一覧を取得。クエリパラメータ `feed_id`（フィードで絞り込み）、`unread=true`（未読のみ）に対応 |
+| POST | `/api/articles/:id/read` | 記事を既読にする |
+| POST | `/api/articles/read-all` | 全記事を既読にする |
+| POST | `/api/import/opml` | OPML ファイルをインポートし、含まれるフィードを一括登録（body: OPML XML） |
+| GET | `/api/stats` | フィード数・未読記事数を取得 |
+
 ## 開発
 
 ```bash
