@@ -6,6 +6,7 @@ version = "0.1.0"
 
 [variables]
 db_url = { required = true }
+db_ca_root = { required = true }
 
 [[trigger.http]]
 route = "/fetch"
@@ -16,6 +17,7 @@ source = "../target/wasm32-wasip1/release/home_rss_fetcher.wasm"
 allowed_outbound_hosts = ["postgres://*:5432", "https://*:443", "http://*:80"]
 [component.fetcher.variables]
 db_url = "{{ db_url }}"
+db_ca_root = "{{ db_ca_root }}"
 [component.fetcher.build]
 command = "cargo build --target wasm32-wasip1 --release -p home-rss-fetcher"
 workdir = ".."

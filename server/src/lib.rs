@@ -1,44 +1,54 @@
 use anyhow::Result;
 use home_rss_shared::db;
+use home_rss_shared::http::{Resp, empty, json};
 use home_rss_shared::models::{Article, CreateFeedRequest, Feed};
-use quick_xml::events::Event;
 use quick_xml::Reader;
-use spin_sdk::http::{IntoResponse, Params, Request, Response, Router};
-use spin_sdk::http_component;
-use spin_sdk::pg4::{Decode, ParameterValue};
+use quick_xml::events::Event;
+use spin_sdk::http::body::IncomingBodyExt;
+use spin_sdk::http::{Method, Request, StatusCode};
+use spin_sdk::http_service;
+use spin_sdk::pg::{Decode, ParameterValue, Row};
 
-#[http_component]
-fn handle(req: Request) -> Result<impl IntoResponse> {
-    let mut router = Router::default();
-    router.get("/api/feeds", list_feeds);
-    router.post("/api/feeds", add_feed);
-    router.delete("/api/feeds/:id", delete_feed);
-    router.get("/api/articles", list_articles);
-    router.post("/api/articles/:id/read", mark_read);
-    router.post("/api/articles/read-all", mark_all_read);
-    router.post("/api/import/opml", import_opml);
-    router.get("/api/stats", get_stats);
-    Ok(router.handle(req))
+#[http_service]
+async fn handle(req: Request) -> Resp {
+    match route(req).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            eprintln!("home-rss-server: {e:#}");
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+        }
+    }
 }
 
-fn json_ok(body: impl Into<String>) -> Result<Response> {
-    Ok(Response::builder()
-        .status(200)
-        .header("content-type", "application/json")
-        .body(body.into())
-        .build())
+async fn route(req: Request) -> Result<Resp> {
+    let method = req.method().clone();
+    let path = req.uri().path().to_owned();
+    let query = req.uri().query().unwrap_or_default().to_owned();
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+
+    match (&method, segments.as_slice()) {
+        (&Method::GET, ["api", "feeds"]) => list_feeds().await,
+        (&Method::POST, ["api", "feeds"]) => add_feed(req).await,
+        (&Method::DELETE, ["api", "feeds", id]) => delete_feed(id).await,
+        (&Method::GET, ["api", "articles"]) => list_articles(&query).await,
+        (&Method::POST, ["api", "articles", "read-all"]) => mark_all_read().await,
+        (&Method::POST, ["api", "articles", id, "read"]) => mark_read(id).await,
+        (&Method::POST, ["api", "import", "opml"]) => import_opml(req).await,
+        (&Method::GET, ["api", "stats"]) => get_stats().await,
+        _ => Ok(error_response(StatusCode::NOT_FOUND, "not found")),
+    }
 }
 
-fn error_response(status: u16, message: &str) -> Result<Response> {
-    Ok(Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(format!(r#"{{"error":{}}}"#, serde_json::to_string(message)?))
-        .build())
+fn json_ok(body: impl Into<String>) -> Result<Resp> {
+    Ok(json(StatusCode::OK, body.into()))
 }
 
-fn parse_query(uri: &str) -> std::collections::HashMap<String, String> {
-    let query = uri.splitn(2, '?').nth(1).unwrap_or("");
+fn error_response(status: StatusCode, message: &str) -> Resp {
+    let body = serde_json::to_string(message).unwrap_or_else(|_| "\"error\"".to_owned());
+    json(status, format!(r#"{{"error":{body}}}"#))
+}
+
+fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
     query
         .split('&')
         .filter_map(|pair| {
@@ -50,120 +60,111 @@ fn parse_query(uri: &str) -> std::collections::HashMap<String, String> {
         .collect()
 }
 
-const FEED_SELECT: &str =
-    "SELECT id::text, url, title, site_url, etag, last_modified, \
+const FEED_SELECT: &str = "SELECT id::text, url, title, site_url, etag, last_modified, \
      EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
      EXTRACT(EPOCH FROM created_at)::bigint \
      FROM feeds";
 
-const ARTICLE_SELECT: &str =
-    "SELECT a.id::text, a.feed_id::text, a.url, a.title, a.content, a.author, \
+const ARTICLE_SELECT: &str = "SELECT a.id::text, a.feed_id::text, a.url, a.title, a.content, a.author, \
      EXTRACT(EPOCH FROM a.published_at)::bigint, \
      EXTRACT(EPOCH FROM a.fetched_at)::bigint \
      FROM articles a";
 
-fn row_to_feed(row: &[spin_sdk::pg4::DbValue]) -> Result<Feed> {
+fn row_to_feed(row: &Row) -> Result<Feed> {
     Ok(Feed {
-        id: String::decode(&row[0]).map_err(|e| anyhow::anyhow!("{e}"))?,
-        url: String::decode(&row[1]).map_err(|e| anyhow::anyhow!("{e}"))?,
-        title: Option::<String>::decode(&row[2]).map_err(|e| anyhow::anyhow!("{e}"))?,
-        site_url: Option::<String>::decode(&row[3]).map_err(|e| anyhow::anyhow!("{e}"))?,
-        etag: Option::<String>::decode(&row[4]).map_err(|e| anyhow::anyhow!("{e}"))?,
-        last_modified: Option::<String>::decode(&row[5])
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        last_fetched_at: Option::<i64>::decode(&row[6])
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        created_at: Option::<i64>::decode(&row[7]).map_err(|e| anyhow::anyhow!("{e}"))?,
+        id: String::decode(&row[0])?,
+        url: String::decode(&row[1])?,
+        title: Option::<String>::decode(&row[2])?,
+        site_url: Option::<String>::decode(&row[3])?,
+        etag: Option::<String>::decode(&row[4])?,
+        last_modified: Option::<String>::decode(&row[5])?,
+        last_fetched_at: Option::<i64>::decode(&row[6])?,
+        created_at: Option::<i64>::decode(&row[7])?,
     })
 }
 
-fn row_to_article(row: &[spin_sdk::pg4::DbValue]) -> Result<Article> {
+fn row_to_article(row: &Row) -> Result<Article> {
     Ok(Article {
-        id: String::decode(&row[0]).map_err(|e| anyhow::anyhow!("{e}"))?,
-        feed_id: String::decode(&row[1]).map_err(|e| anyhow::anyhow!("{e}"))?,
-        url: String::decode(&row[2]).map_err(|e| anyhow::anyhow!("{e}"))?,
-        title: String::decode(&row[3]).map_err(|e| anyhow::anyhow!("{e}"))?,
-        content: Option::<String>::decode(&row[4]).map_err(|e| anyhow::anyhow!("{e}"))?,
-        author: Option::<String>::decode(&row[5]).map_err(|e| anyhow::anyhow!("{e}"))?,
-        published_at: Option::<i64>::decode(&row[6])
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-        fetched_at: Option::<i64>::decode(&row[7]).map_err(|e| anyhow::anyhow!("{e}"))?,
+        id: String::decode(&row[0])?,
+        feed_id: String::decode(&row[1])?,
+        url: String::decode(&row[2])?,
+        title: String::decode(&row[3])?,
+        content: Option::<String>::decode(&row[4])?,
+        author: Option::<String>::decode(&row[5])?,
+        published_at: Option::<i64>::decode(&row[6])?,
+        fetched_at: Option::<i64>::decode(&row[7])?,
     })
 }
 
-fn list_feeds(_req: Request, _params: Params) -> Result<Response> {
-    let conn = db::connect()?;
-    let result = conn.query(
-        &format!("{FEED_SELECT} ORDER BY created_at DESC"),
-        &[],
-    )?;
-    let feeds: Vec<Feed> = result
-        .rows
-        .iter()
-        .map(|row| row_to_feed(row))
-        .collect::<Result<_>>()?;
+async fn list_feeds() -> Result<Resp> {
+    let conn = db::connect().await?;
+    let rows = conn
+        .query(format!("{FEED_SELECT} ORDER BY created_at DESC"), vec![])
+        .await?
+        .collect()
+        .await?;
+    let feeds: Vec<Feed> = rows.iter().map(row_to_feed).collect::<Result<_>>()?;
     json_ok(serde_json::to_string(&feeds)?)
 }
 
-fn add_feed(req: Request, _params: Params) -> Result<Response> {
-    let create_req: CreateFeedRequest = match serde_json::from_slice(req.body()) {
+async fn add_feed(req: Request) -> Result<Resp> {
+    let body = req.into_body().bytes().await?;
+    let create_req: CreateFeedRequest = match serde_json::from_slice(body.as_ref()) {
         Ok(r) => r,
-        Err(_) => return error_response(400, "invalid JSON body"),
+        Err(_) => return Ok(error_response(StatusCode::BAD_REQUEST, "invalid JSON body")),
     };
 
-    let conn = db::connect()?;
-    let result = conn.query(
-        &format!(
+    let conn = db::connect().await?;
+    let rows = conn
+        .query(
             "INSERT INTO feeds (url) VALUES ($1) \
              ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
              RETURNING id::text, url, title, site_url, etag, last_modified, \
              EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint"
-        ),
-        &[ParameterValue::Str(create_req.url)],
-    )?;
+             EXTRACT(EPOCH FROM created_at)::bigint",
+            vec![ParameterValue::Str(create_req.url)],
+        )
+        .await?
+        .collect()
+        .await?;
 
-    match result.rows.first() {
+    match rows.first() {
         Some(row) => {
             let feed = row_to_feed(row)?;
-            Ok(Response::builder()
-                .status(201)
-                .header("content-type", "application/json")
-                .body(serde_json::to_string(&feed)?)
-                .build())
+            Ok(json(StatusCode::CREATED, serde_json::to_string(&feed)?))
         }
-        None => error_response(500, "failed to insert feed"),
+        None => Ok(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to insert feed",
+        )),
     }
 }
 
-fn delete_feed(_req: Request, params: Params) -> Result<Response> {
-    let id = match params.get("id") {
-        Some(id) => id.to_string(),
-        None => return error_response(400, "missing id"),
-    };
-
-    let conn = db::connect()?;
-    let rows = conn.execute(
-        "DELETE FROM feeds WHERE id = $1::uuid",
-        &[ParameterValue::Str(id)],
-    )?;
+async fn delete_feed(id: &str) -> Result<Resp> {
+    let conn = db::connect().await?;
+    let rows = conn
+        .execute(
+            "DELETE FROM feeds WHERE id = $1::uuid",
+            vec![ParameterValue::Str(id.to_owned())],
+        )
+        .await?;
 
     if rows == 0 {
-        error_response(404, "feed not found")
+        Ok(error_response(StatusCode::NOT_FOUND, "feed not found"))
     } else {
-        Ok(Response::builder().status(204).body(()).build())
+        Ok(empty(StatusCode::NO_CONTENT))
     }
 }
 
-fn list_articles(req: Request, _params: Params) -> Result<Response> {
-    let params_map = parse_query(req.uri());
+async fn list_articles(query: &str) -> Result<Resp> {
+    let params_map = parse_query(query);
     let feed_id = params_map.get("feed_id").cloned();
     let unread = params_map
         .get("unread")
         .map(|s| s == "true")
         .unwrap_or(false);
 
-    let conn = db::connect()?;
+    let conn = db::connect().await?;
 
     let (sql, query_params): (String, Vec<ParameterValue>) = match (feed_id, unread) {
         (Some(fid), true) => (
@@ -198,57 +199,56 @@ fn list_articles(req: Request, _params: Params) -> Result<Response> {
         ),
     };
 
-    let result = conn.query(&sql, &query_params)?;
-    let articles: Vec<Article> = result
-        .rows
-        .iter()
-        .map(|row| row_to_article(row))
-        .collect::<Result<_>>()?;
+    let rows = conn.query(sql, query_params).await?.collect().await?;
+    let articles: Vec<Article> = rows.iter().map(row_to_article).collect::<Result<_>>()?;
     json_ok(serde_json::to_string(&articles)?)
 }
 
-fn mark_read(_req: Request, params: Params) -> Result<Response> {
-    let id = match params.get("id") {
-        Some(id) => id.to_string(),
-        None => return error_response(400, "missing id"),
-    };
-
-    let conn = db::connect()?;
+async fn mark_read(id: &str) -> Result<Resp> {
+    let conn = db::connect().await?;
     conn.execute(
         "INSERT INTO read_status (article_id) VALUES ($1::uuid) ON CONFLICT DO NOTHING",
-        &[ParameterValue::Str(id)],
-    )?;
+        vec![ParameterValue::Str(id.to_owned())],
+    )
+    .await?;
 
-    Ok(Response::builder().status(204).body(()).build())
+    Ok(empty(StatusCode::NO_CONTENT))
 }
 
-fn mark_all_read(_req: Request, _params: Params) -> Result<Response> {
-    let conn = db::connect()?;
+async fn mark_all_read() -> Result<Resp> {
+    let conn = db::connect().await?;
     conn.execute(
         "INSERT INTO read_status (article_id) \
          SELECT id FROM articles a \
          WHERE NOT EXISTS (SELECT 1 FROM read_status rs WHERE rs.article_id = a.id) \
          ON CONFLICT DO NOTHING",
-        &[],
-    )?;
+        vec![],
+    )
+    .await?;
 
-    Ok(Response::builder().status(204).body(()).build())
+    Ok(empty(StatusCode::NO_CONTENT))
 }
 
-fn import_opml(req: Request, _params: Params) -> Result<Response> {
-    let urls = parse_opml(req.body())?;
+async fn import_opml(req: Request) -> Result<Resp> {
+    let body = req.into_body().bytes().await?;
+    let urls = parse_opml(body.as_ref())?;
 
     if urls.is_empty() {
-        return error_response(400, "no feeds found in OPML");
+        return Ok(error_response(
+            StatusCode::BAD_REQUEST,
+            "no feeds found in OPML",
+        ));
     }
 
-    let conn = db::connect()?;
+    let conn = db::connect().await?;
     let mut imported = 0u64;
     for url in &urls {
-        imported += conn.execute(
-            "INSERT INTO feeds (url) VALUES ($1) ON CONFLICT (url) DO NOTHING",
-            &[ParameterValue::Str(url.clone())],
-        )?;
+        imported += conn
+            .execute(
+                "INSERT INTO feeds (url) VALUES ($1) ON CONFLICT (url) DO NOTHING",
+                vec![ParameterValue::Str(url.clone())],
+            )
+            .await?;
     }
 
     json_ok(format!(r#"{{"imported":{imported}}}"#))
@@ -264,12 +264,12 @@ fn parse_opml(data: &[u8]) -> Result<Vec<String>> {
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
                 if e.name().as_ref().eq_ignore_ascii_case(b"outline") {
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref().eq_ignore_ascii_case(b"xmlUrl") {
-                            if let Ok(val) = std::str::from_utf8(&attr.value) {
-                                let url = val.trim().to_string();
-                                if !url.is_empty() {
-                                    urls.push(url);
-                                }
+                        if attr.key.as_ref().eq_ignore_ascii_case(b"xmlUrl")
+                            && let Ok(val) = std::str::from_utf8(&attr.value)
+                        {
+                            let url = val.trim().to_string();
+                            if !url.is_empty() {
+                                urls.push(url);
                             }
                         }
                     }
@@ -285,22 +285,22 @@ fn parse_opml(data: &[u8]) -> Result<Vec<String>> {
     Ok(urls)
 }
 
-fn get_stats(_req: Request, _params: Params) -> Result<Response> {
-    let conn = db::connect()?;
-    let result = conn.query(
-        "SELECT \
-         (SELECT COUNT(*)::bigint FROM feeds) AS feeds, \
-         (SELECT COUNT(*)::bigint FROM articles a \
-          WHERE NOT EXISTS (SELECT 1 FROM read_status rs WHERE rs.article_id = a.id)) AS unread",
-        &[],
-    )?;
+async fn get_stats() -> Result<Resp> {
+    let conn = db::connect().await?;
+    let rows = conn
+        .query(
+            "SELECT \
+             (SELECT COUNT(*)::bigint FROM feeds) AS feeds, \
+             (SELECT COUNT(*)::bigint FROM articles a \
+              WHERE NOT EXISTS (SELECT 1 FROM read_status rs WHERE rs.article_id = a.id)) AS unread",
+            vec![],
+        )
+        .await?
+        .collect()
+        .await?;
 
-    let (feeds, unread) = match result.rows.first() {
-        Some(row) => {
-            let feeds = i64::decode(&row[0]).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let unread = i64::decode(&row[1]).map_err(|e| anyhow::anyhow!("{e}"))?;
-            (feeds, unread)
-        }
+    let (feeds, unread) = match rows.first() {
+        Some(row) => (i64::decode(&row[0])?, i64::decode(&row[1])?),
         None => (0, 0),
     };
 
