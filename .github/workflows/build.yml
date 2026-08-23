@@ -4,24 +4,16 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+  # No paths filter. `CI Gate` is a required check, so a pull request that
+  # touches nothing on the list starts no run, reports nothing, and waits
+  # forever for a status that will never arrive. The list was grown one entry
+  # at a time as each blocked case turned up — workflows, then the Renovate
+  # config — and a README-only change was the next one to find. An enumeration
+  # that has to be exhaustive to avoid a deadlock will keep being wrong.
+  #
+  # home-cluster's lint.yaml runs on every pull request for the same reason.
   pull_request:
     branches: [main]
-    paths:
-      - "server/**"
-      - "ui/**"
-      - "fetcher/**"
-      - "cleaner/**"
-      - "shared/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      # Any workflow file, not just this one — the actionlint and zizmor jobs
-      # below audit every workflow in the repo, so a new one has to trigger them.
-      - ".github/workflows/**"
-      # Same reason for the Renovate config: lint-renovate validates it, and
-      # `CI Gate` is a required check. Without this line a Renovate-only PR
-      # starts no run at all, nothing reports, and the PR is blocked forever
-      # on "Waiting for status to be reported".
-      - "renovate.json*"
 
 # `packages: write` used to be granted here, which handed it to every job
 # including the gate. Only the two jobs that actually push to GHCR ask for it.
