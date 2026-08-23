@@ -97,6 +97,9 @@ Issue はフェーズとリポジトリのラベルで分類:
 
 - **PUBLIC リポジトリではない** — private だが、機密値はコミットしない習慣を維持
 - Spin の cron trigger は SpinKube 非対応 → command trigger + K8s CronJob を使う
+- **フィード取得は HTTPS のみ**。`fetcher/spin.toml` の `allowed_outbound_hosts` に
+  `http://*:80` を戻しても、home-cluster の CNP が world:443 しか開けていないので
+  平文フィードは失敗ではなくハングする。開けるなら両方を揃えて直すこと
 - Spin SDK の PostgreSQL データ型サポートを事前に確認すること (UUID, TIMESTAMPTZ 等)
 
 ### spin-sdk 6.x への移行で踏んだところ
