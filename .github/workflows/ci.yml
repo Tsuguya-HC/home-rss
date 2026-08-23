@@ -1,0 +1,159 @@
+name: CI
+
+# 必須ステータスチェックを単一 gate に集約するオーケストレーター。
+# 各検査は workflow_call の leaf にあり、ここはそれを組み立てるだけ。
+# ruleset に登録する必須チェックは末尾の `CI Gate` 1 個。
+#
+# リリース (タグ push で GHCR へ) は release.yml に分けてある。同じ leaf を
+# 呼ぶが concurrency の要件が正反対で、1 つのワークフローに同居させると
+# `cancel-in-progress` を式で切り替える形にならざるを得ない。
+#
+# トリガーに paths フィルタは付けない。leaf をトリガー側で絞ると、該当しない
+# PR ではチェックが報告されず、必須化された context が
+# "Expected — Waiting for status to be reported" のまま永久にブロックする。
+# このリポジトリはそれを踏んで workflows → renovate 設定と 2 度リストを
+# 継ぎ足した末に、README だけの変更でまた止まった。触るファイルを列挙しきる
+# 形は、デッドロック回避の手段として間違っている。
+#
+# 代わりに起動は常にして、`detect` が leaf ごとの実行要否を出す。skip した
+# leaf は gate から見て `skipped` = 合格扱いになるので、報告は常に発生する。
+on:
+  pull_request:
+    branches: [main]
+    # `edited` on top of the default opened/synchronize/reopened. retarget では
+    # head SHA が変わらないので、これが無いと旧 base で計算した detect の結果
+    # （= leaf を skip した緑）がそのまま新 base の必須チェックに流用できる。
+    # leaf の実行要否を base 差分で決める以上、これは fail-open になる。
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.number }}
+  cancel-in-progress: true
+
+jobs:
+  # 変更ファイル種別を判定し、各 leaf を実行すべきかを outputs で返す。
+  # merge-base 等のエッジケースを正しく扱うため dorny/paths-filter を使う。
+  #
+  # leaf 自身のワークフローファイルも各フィルタに入れてある（自己参照）。leaf の
+  # 中身を変えた PR がその leaf を走らせないのでは検証にならない。
+  detect:
+    name: detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # dorny/paths-filter が PR の変更ファイル一覧を API 取得するために必要
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      ui: ${{ steps.filter.outputs.ui }}
+      workflows: ${{ steps.filter.outputs.workflows }}
+      renovate: ${{ steps.filter.outputs.renovate }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'server/**'
+              - 'fetcher/**'
+              - 'cleaner/**'
+              - 'shared/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - '.github/workflows/_build-rust.yml'
+              - '.github/workflows/_test.yml'
+            ui:
+              - 'ui/**'
+              - '.github/workflows/_build-ui.yml'
+            workflows:
+              - '.github/workflows/**'
+              - '.github/zizmor.yml'
+            renovate:
+              - 'renovate.json*'
+
+  build-rust:
+    needs: detect
+    if: ${{ needs.detect.outputs.rust == 'true' }}
+    uses: ./.github/workflows/_build-rust.yml
+    # publish を渡さないので GHCR には触らない。`packages` は渡さない。
+    permissions:
+      contents: read
+
+  test:
+    needs: detect
+    if: ${{ needs.detect.outputs.rust == 'true' }}
+    uses: ./.github/workflows/_test.yml
+    permissions:
+      contents: read
+
+  build-ui:
+    needs: detect
+    if: ${{ needs.detect.outputs.ui == 'true' }}
+    uses: ./.github/workflows/_build-ui.yml
+    # 同上 — 検証呼び出しは GHCR に触らない。
+    permissions:
+      contents: read
+
+  # Checks the workflow expressions and job graph, and shells out to shellcheck
+  # for every `run:` block.
+  # ワークフローの lint は 6 リポジトリ共通なので home-actions に寄せてある。
+  # ツールのピンは向こう側にあり、ここは呼び先の SHA を追うだけ。
+  lint-workflows:
+    needs: detect
+    if: ${{ needs.detect.outputs.workflows == 'true' }}
+    uses: Tsuguya/home-actions/.github/workflows/lint-workflows.yml@bd99e01e99bcce1b845aa7abae3b3ed3b61f464f # v1.1.0
+    permissions:
+      contents: read
+
+  # Renovate 設定の検証。Renovate は知らないキーを黙って捨てるので（PR も警告も
+  # 出ない）、バリデータだけがこの層の間違いを検出できる。home-cluster は
+  # `ignoredAuthors` の綴り違いを 5 週間放置していた。
+  lint-renovate:
+    needs: detect
+    if: ${{ needs.detect.outputs.renovate == 'true' }}
+    uses: Tsuguya/home-actions/.github/workflows/lint-renovate.yml@bd99e01e99bcce1b845aa7abae3b3ed3b61f464f # v1.1.0
+    permissions:
+      contents: read
+
+  # 唯一の必須チェック。全 leaf の結果を集計し、success/skipped なら合格、
+  # failure/cancelled が 1 つでもあれば fail させる。
+  #
+  # `detect` も needs に含める。detect が失敗すると全 leaf の `if` が偽になって
+  # skip され、skip は合格扱いなので、detect を見ていないと「何も検査していない
+  # 緑」が必須チェックを満たしてしまう。
+  gate:
+    name: CI Gate
+    needs: [detect, build-rust, test, build-ui, lint-workflows, lint-renovate]
+    # `always()` ではなく `!cancelled()`。always() だと run をキャンセルしたとき
+    # 全ての leaf が `cancelled` を返し、下の case をすり抜けて必須チェックが
+    # 失敗として記録される。キャンセルされた run に下すべき判定は無い。
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Aggregate results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "Results: ${RESULTS}"
+          # fail-closed: an empty needs list would make the loop pass vacuously
+          if [ -z "${RESULTS// /}" ]; then
+            echo "::error::No job results to aggregate (empty needs) — failing closed."
+            exit 1
+          fi
+          for r in ${RESULTS}; do
+            case "${r}" in
+              success|skipped) ;;
+              *) echo "::error::A required job concluded with: ${r}"; exit 1 ;;
+            esac
+          done
+          echo "All required jobs passed or were correctly skipped."

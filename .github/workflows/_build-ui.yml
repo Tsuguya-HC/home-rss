@@ -1,0 +1,80 @@
+name: build ui
+
+# UI (spin-fileserver + vite の成果物) のビルド leaf。
+# concurrency を持たない理由は _build-rust.yml と同じ。
+on:
+  workflow_call:
+    inputs:
+      publish:
+        description: ビルド成果物を GHCR に push するか
+        type: boolean
+        default: false
+      tag:
+        description: push 先のタグ。publish が true のときだけ使う
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  build-ui:
+    name: build ui
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # permissions を宣言しない理由は _build-rust.yml と同じ（呼び出し元が
+    # 渡した権限を超えられないので、ここに書くと検証側にも要求してしまう）。
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      # No `version:` — the action reads ui/package.json's packageManager field,
+      # so the pnpm CI runs on is pinned and Renovate proposes bumps as PRs.
+      # `latest` silently rolled onto pnpm 11, whose stricter handling of
+      # ignored install scripts broke every build here.
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          package_json_file: ui/package.json
+
+      # 検証ビルドだけキャッシュする。理由は _build-rust.yml と同じ。
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        if: ${{ !inputs.publish }}
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        if: ${{ inputs.publish }}
+        with:
+          node-version: 24
+
+      - uses: fermyon/actions/spin/setup@8849a6c41270af8e9f60f371982eddf33b8e35c9 # v1.0.12
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build UI
+        working-directory: ui
+        run: pnpm install --frozen-lockfile && pnpm run build
+
+      - name: Log in to GHCR
+        if: ${{ inputs.publish }}
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push ui to GHCR
+        if: ${{ inputs.publish }}
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAG}" ]; then
+            echo "::error::publish was requested without a tag"
+            exit 1
+          fi
+          spin registry push \
+            -f "ui/spin.toml" \
+            "ghcr.io/tsuguya/home-rss-ui:${TAG}"

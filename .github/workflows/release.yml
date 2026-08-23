@@ -1,0 +1,72 @@
+name: Release
+
+# タグを打って 4 つのイメージを GHCR へ publish する。CI (ci.yml) とは
+# **concurrency の要件が正反対** なので別ワークフローにしてある:
+#
+#   ci.yml   … PR の最新 push だけ残したい     → cancel-in-progress: true
+#   release  … 進行中の publish を絶対に殺さない → cancel-in-progress: false
+#
+# 1 つのワークフローに同居させると `cancel-in-progress` をイベント名で切り替える
+# 式になり、「この run はキャンセルされうるのか」を読む側が毎回評価する形になる。
+#
+# ビルドの実体は ci.yml と同じ leaf を `publish: true` で呼ぶだけなので、
+# 手順が二重管理になることはない。
+on:
+  push:
+    tags: ["v*"]
+  # ビルド漏れ（publish 途中の失敗など）からの復旧用。タグを打ち直さずに
+  # 同じタグを再 publish できる。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "再 publish するタグ (例: v0.1.3)"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  # タグごとに 1 本。既定の `queue: single` は pending を 1 つしか保持せず、
+  # 3 本目で 2 本目が黙って置換されるが、ここはタグ単位のグループなので
+  # そもそも同じキューに 2 本並ばない。
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref_name }}
+  # 進行中の publish を後続が殺すと、一部のイメージだけが push された状態で
+  # 止まる。タグは不変なので、待たせるほうが安全。
+  cancel-in-progress: false
+
+jobs:
+  # dispatch は main からのみ許可する（誤操作防止のガード）。
+  # 注意: dispatch は選択した ref のワークフローが実行されるため、ブランチ上で
+  # このガードを外せば write 権限者は素通りできる = 強制力のある境界ではない。
+  # ジョブレベル if の skip（緑表示）ではなく明示的に fail させる。
+  guard:
+    name: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Reject non-main dispatch
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::workflow_dispatch は main からのみ実行できます（選択された ref: ${GITHUB_REF}）"
+          exit 1
+
+  build-rust:
+    needs: guard
+    uses: ./.github/workflows/_build-rust.yml
+    with:
+      publish: true
+      tag: ${{ inputs.tag || github.ref_name }}
+    permissions:
+      contents: read
+      packages: write # spin registry push → ghcr.io
+
+  build-ui:
+    needs: guard
+    uses: ./.github/workflows/_build-ui.yml
+    with:
+      publish: true
+      tag: ${{ inputs.tag || github.ref_name }}
+    permissions:
+      contents: read
+      packages: write # spin registry push → ghcr.io
