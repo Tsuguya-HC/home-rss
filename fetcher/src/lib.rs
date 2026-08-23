@@ -1,5 +1,4 @@
 use anyhow::Result;
-use chrono::NaiveDateTime;
 use feed_rs::parser;
 use home_rss_shared::db;
 use home_rss_shared::http::{Resp, text};
@@ -96,12 +95,12 @@ async fn process_feed(
             .and_then(|c| c.body.as_deref())
             .or_else(|| entry.summary.as_ref().map(|s| s.content.as_str()));
         let author = entry.authors.first().map(|a| a.name.as_str());
-        let published_at: Option<NaiveDateTime> =
-            entry.published.or(entry.updated).map(|dt| dt.naive_utc());
+        let published_at: Option<String> =
+            entry.published.or(entry.updated).map(|dt| dt.to_rfc3339());
 
         conn.execute(
             "INSERT INTO articles (feed_id, url, title, content, author, published_at) \
-             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+             VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz) ON CONFLICT DO NOTHING",
             vec![
                 ParameterValue::Uuid(feed_id.to_owned()),
                 entry_url.to_owned().into(),

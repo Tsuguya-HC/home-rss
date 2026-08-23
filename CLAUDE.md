@@ -111,10 +111,14 @@ Issue はフェーズとリポジトリのラベルで分類:
 - `Request` / `Response` は hyperium (`http` crate) の型。body は
   `req.into_body().bytes().await?` で読む（`IncomingBodyExt`）
 - `QueryResult` はストリーム。`.collect().await?` で `Vec<Row>` を得る
-- **UUID 列には `ParameterValue::Uuid` を渡す。** `$1::uuid` と書いて `Str` を渡す形は
-  通らない（`WrongType { postgres: Uuid, rust: "String" }`）。キャストが付くと
-  PostgreSQL はそのパラメータを uuid 型と推論するため。読み取り側の `SELECT id::text`
-  は逆向きなのでそのままでよい
+- **パラメータに直接キャストを書くと、PostgreSQL はそのパラメータをその型と推論する。**
+  `$1::uuid` に `Str` を渡すと `WrongType { postgres: Uuid, rust: "String" }` で落ちる。
+  対処は 2 通り:
+  - 対応する variant がある型（UUID）は `ParameterValue::Uuid` を渡し、キャストを外す
+  - variant が無い型（TIMESTAMPTZ / INTERVAL）は **`$1::text::timestamptz` のように
+    text を経由**する。こう書くと推論は text になる。SDK は `NaiveDateTime` を
+    TIMESTAMP にしかマップせず、この DB の時刻列は全て TIMESTAMPTZ
+  - 読み取り側の `SELECT id::text` / `EXTRACT(EPOCH FROM ...)` は逆向きなので影響なし
 
 ### PostgreSQL TLS
 
