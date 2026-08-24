@@ -1,5 +1,10 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  // Rebase whenever the branch falls behind main. The default only rebases
+  // automerge candidates, so a PR a human merges would sit on a stale main and
+  // report CI results from a workflow that no longer exists there.
+  "rebaseWhen": "behind-base-branch",
+
 
   // The aqua preset is pinned rather than floating: it owns which files the aqua
   // manager reads, and a preset-side change would silently re-scope this repo.
