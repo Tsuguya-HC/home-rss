@@ -14,15 +14,13 @@ on:
         type: string
         default: ""
 
-permissions: {}
-
+# permissions を書かない理由は _build-rust.yml と同じ（呼び出し元の付与を
+# そのまま継承させる。`{}` を置くと release の packages: write が消える）。
 jobs:
-  build-ui:
+  build-ui: # zizmor: ignore[excessive-permissions] reusable workflow — permissions come from the caller job (see comment above)
     name: build ui
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # permissions を宣言しない理由は _build-rust.yml と同じ（呼び出し元が
-    # 渡した権限を超えられないので、ここに書くと検証側にも要求してしまう）。
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
