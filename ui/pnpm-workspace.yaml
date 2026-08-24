@@ -6,13 +6,15 @@
 # tree.
 minimumReleaseAge: 4320
 
-# pnpm 10+ refuses to run a dependency's install scripts unless it is listed
+# pnpm 10+ refuses to run a dependency's install scripts unless it is allowed
 # here, and pnpm 11 turns that from a warning into ERR_PNPM_IGNORED_BUILDS —
 # which is what has been failing build-ui (and therefore every open PR) since
 # the action's `version: latest` rolled forward. esbuild's postinstall fetches
 # its platform binary, so vite cannot build without it.
-onlyBuiltDependencies:
-  - esbuild
+# allowBuilds is the pnpm 11 spelling (onlyBuiltDependencies was removed) and
+# pnpm 10.34 reads it too; the `pnpm` field in package.json is no longer read.
+allowBuilds:
+  esbuild: true
 minimumReleaseAgeExclude:
   # Renovate security update: dompurify@3.4.13
   - dompurify@3.4.13
