@@ -18,19 +18,19 @@ on:
         type: string
         default: ""
 
-permissions: {}
-
+# permissions はワークフローにも job にも書かない。reusable workflow の job は
+# 呼び出し元が job に渡した権限をそのまま継承し、超えることはできない。
+# ここに `permissions: {}` を置くと job がそれを継承して呼び出し元の
+# `packages: write` が届かず、`spin registry push` が 403 になる（v0.1.4 で
+# 実際に起きた）。逆に job に `packages: write` と書くと、push しない検証
+# 呼び出し側にも同じ権限を要求することになる。必要な権限は呼び出し元が決める:
+#   ci.yml      → contents: read だけ
+#   release.yml → contents: read + packages: write
 jobs:
-  build-rust:
+  build-rust: # zizmor: ignore[excessive-permissions] reusable workflow — permissions come from the caller job (see comment above)
     name: build rust
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # permissions を宣言しない。reusable workflow の job は呼び出し元が渡した
-    # 権限を超えられず、超える宣言をすると run 自体が拒否される。ここに
-    # `packages: write` と書くと、push しない検証呼び出し側にも同じ権限を
-    # 要求することになる。必要な権限は呼び出し元が決める:
-    #   ci.yml      → contents: read だけ
-    #   release.yml → contents: read + packages: write
     strategy:
       fail-fast: false
       matrix:
