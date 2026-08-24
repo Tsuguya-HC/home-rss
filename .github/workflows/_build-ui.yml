@@ -32,7 +32,7 @@ jobs:
       # so the pnpm CI runs on is pinned and Renovate proposes bumps as PRs.
       # `latest` silently rolled onto pnpm 11, whose stricter handling of
       # ignored install scripts broke every build here.
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           package_json_file: ui/package.json
 
