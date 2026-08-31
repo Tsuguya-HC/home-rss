@@ -79,7 +79,7 @@ cargo build --target wasm32-wasip1 --release
 
 対象 Issue の要件が既に実装済み、または作業の必要がない場合:
 - PR は作成しない
-- `gh issue comment $ISSUE_NUMBER --repo Tsuguya/home-rss` で理由をコメントする（例: 「既に PR #XX でマージ済み」）
+- `gh issue comment $ISSUE_NUMBER --repo Tsuguya-HC/home-rss` で理由をコメントする（例: 「既に PR #XX でマージ済み」）
 - コミット・プッシュもしない
 
 ## 判断に迷ったとき
