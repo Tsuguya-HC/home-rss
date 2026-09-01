@@ -255,20 +255,18 @@ async fn import_opml(req: Request) -> Result<Resp> {
 }
 
 fn parse_opml(data: &[u8]) -> Result<Vec<String>> {
-    let mut reader = Reader::from_reader(data);
+    let text = String::from_utf8_lossy(data);
+    let mut reader = Reader::from_str(&text);
     let mut urls = Vec::new();
-    let mut buf = Vec::new();
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        match reader.read_event() {
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
-                if e.name().as_ref().eq_ignore_ascii_case(b"outline") {
+                if e.name().as_ref().eq_ignore_ascii_case("outline") {
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref().eq_ignore_ascii_case(b"xmlUrl")
-                            && let Ok(val) = std::str::from_utf8(&attr.value)
-                        {
-                            let url = val.trim().to_string();
-                            if !url.is_empty() {
+                        if attr.key.as_ref().eq_ignore_ascii_case("xmlUrl") {
+                            let url = attr.value.trim().to_string();
+                            if !url.is_empty() && !url.contains('\u{FFFD}') {
                                 urls.push(url);
                             }
                         }
@@ -279,7 +277,6 @@ fn parse_opml(data: &[u8]) -> Result<Vec<String>> {
             Err(e) => return Err(anyhow::anyhow!("OPML parse error: {e}")),
             _ => {}
         }
-        buf.clear();
     }
 
     Ok(urls)
@@ -305,4 +302,68 @@ async fn get_stats() -> Result<Resp> {
     };
 
     json_ok(format!(r#"{{"feeds":{feeds},"unread":{unread}}}"#))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_opml;
+
+    #[test]
+    fn extracts_urls_from_nested_and_self_closing_outlines() {
+        let xml = br#"<opml><body>
+            <outline text="A" xmlUrl="http://a.example/feed" />
+            <outline text="Folder">
+                <outline text="B" xmlUrl="http://b.example/feed"></outline>
+            </outline>
+        </body></opml>"#;
+        let urls = parse_opml(xml).unwrap();
+        assert_eq!(urls, vec!["http://a.example/feed", "http://b.example/feed"]);
+    }
+
+    #[test]
+    fn ignores_missing_empty_and_whitespace_only_xml_url() {
+        let xml = br#"<opml><body>
+            <outline text="no url" />
+            <outline text="empty" xmlUrl="" />
+            <outline text="whitespace" xmlUrl="   " />
+            <outline text="ok" xmlUrl="http://ok.example/feed" />
+        </body></opml>"#;
+        let urls = parse_opml(xml).unwrap();
+        assert_eq!(urls, vec!["http://ok.example/feed"]);
+    }
+
+    #[test]
+    fn recovers_urls_when_only_text_attribute_has_invalid_utf8() {
+        let mut xml = Vec::new();
+        xml.extend_from_slice(br#"<opml><body><outline text=""#);
+        xml.push(0xFF);
+        xml.extend_from_slice(br#"" xmlUrl="http://broken-text.example/feed" />"#);
+        xml.extend_from_slice(
+            br#"<outline text="ok" xmlUrl="http://ok.example/feed" /></body></opml>"#,
+        );
+        let urls = parse_opml(&xml).unwrap();
+        assert_eq!(
+            urls,
+            vec!["http://broken-text.example/feed", "http://ok.example/feed"]
+        );
+    }
+
+    #[test]
+    fn skips_entry_when_xml_url_itself_has_invalid_utf8() {
+        let mut xml = Vec::new();
+        xml.extend_from_slice(br#"<opml><body><outline text="bad" xmlUrl="http://broken"#);
+        xml.push(0xFF);
+        xml.extend_from_slice(br#".example/feed" />"#);
+        xml.extend_from_slice(
+            br#"<outline text="ok" xmlUrl="http://ok.example/feed" /></body></opml>"#,
+        );
+        let urls = parse_opml(&xml).unwrap();
+        assert_eq!(urls, vec!["http://ok.example/feed"]);
+    }
+
+    #[test]
+    fn errors_on_malformed_xml() {
+        let xml = br#"<opml><body><outline xmlUrl="http://a.example/feed"></body></opml>"#;
+        assert!(parse_opml(xml).is_err());
+    }
 }
