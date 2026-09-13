@@ -14,10 +14,10 @@ rss.infra.tgy.io → oauth2-proxy → server (http trigger) ─── API ──
 
 | サービス | trigger | 役割 | K8s リソース | OCI イメージ |
 |---------|---------|------|-------------|-------------|
-| server | http | REST API | SpinApp | `ghcr.io/tsuguya/home-rss-server` |
-| ui | http | Web UI (HTMX) + 静的ファイル (spin-fileserver) | SpinApp | `ghcr.io/tsuguya/home-rss-ui` |
-| fetcher | command | フィード収集 → DB 書き込み | CronJob | `ghcr.io/tsuguya/home-rss-fetcher` |
-| cleaner | command | 古い記事の削除 | CronJob | `ghcr.io/tsuguya/home-rss-cleaner` |
+| server | http | REST API | SpinApp | `ghcr.io/tsuguya-hc/home-rss-server` |
+| ui | http | Web UI (HTMX) + 静的ファイル (spin-fileserver) | SpinApp | `ghcr.io/tsuguya-hc/home-rss-ui` |
+| fetcher | command | フィード収集 → DB 書き込み | CronJob | `ghcr.io/tsuguya-hc/home-rss-fetcher` |
+| cleaner | command | 古い記事の削除 | CronJob | `ghcr.io/tsuguya-hc/home-rss-cleaner` |
 
 ## リポジトリ構成
 

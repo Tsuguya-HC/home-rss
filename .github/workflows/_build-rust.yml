@@ -107,4 +107,4 @@ jobs:
           fi
           spin registry push \
             -f "${SERVICE}/spin.toml" \
-            "ghcr.io/tsuguya/home-rss-${SERVICE}:${TAG}"
+            "ghcr.io/tsuguya-hc/home-rss-${SERVICE}:${TAG}"
