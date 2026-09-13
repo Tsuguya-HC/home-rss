@@ -15,7 +15,7 @@ rss.infra.tgy.io → oauth2-proxy → server (http trigger) ─── API ──
 | サービス | trigger | 役割 | K8s リソース | OCI イメージ |
 |---------|---------|------|-------------|-------------|
 | server | http | REST API | SpinApp | `ghcr.io/tsuguya-hc/home-rss-server` |
-| ui | http | Web UI (HTMX) + 静的ファイル (spin-fileserver) | SpinApp | `ghcr.io/tsuguya-hc/home-rss-ui` |
+| ui | http | Web UI (React SPA) + 静的ファイル (spin-fileserver) | SpinApp | `ghcr.io/tsuguya-hc/home-rss-ui` |
 | fetcher | command | フィード収集 → DB 書き込み | CronJob | `ghcr.io/tsuguya-hc/home-rss-fetcher` |
 | cleaner | command | 古い記事の削除 | CronJob | `ghcr.io/tsuguya-hc/home-rss-cleaner` |
 
@@ -24,14 +24,16 @@ rss.infra.tgy.io → oauth2-proxy → server (http trigger) ─── API ──
 ```
 home-rss/
 ├── server/           # REST API (http trigger)
-├── ui/               # Web UI (http trigger, spin-fileserver)
+├── ui/               # Web UI (React + Vite + TypeScript, pnpm)。ビルド成果物を spin-fileserver が配信
 ├── fetcher/          # フィード収集 (command trigger)
 ├── cleaner/          # 古い記事削除 (command trigger)
 ├── shared/           # 共有ライブラリ (DB モデル、型定義)
 ├── migrations/       # SQL マイグレーション
 ├── Cargo.toml        # workspace
 └── .github/workflows/
-    └── build.yml     # 4 イメージを並列ビルド → GHCR push
+    ├── ci.yml        # detect changes → leaf ジョブ → CI Gate
+    ├── _build-rust.yml / _build-ui.yml / _test.yml   # leaf（reusable）
+    └── release.yml   # イメージを GHCR push
 ```
 
 Cargo workspace で `shared` クレートを共有。各サービスは独立した Spin app (spin.toml + Cargo.toml)。
@@ -40,7 +42,7 @@ Cargo workspace で `shared` クレートを共有。各サービスは独立し
 
 - **言語**: Rust → wasm32-wasip1
 - **フレームワーク**: spin-sdk 6.x (HTTP, PostgreSQL, outbound HTTP) — WASI 0.3 ベースで全 API が async
-- **UI**: HTMX + spin-fileserver
+- **UI**: React + Vite + TypeScript（`ui/`、pnpm 管理）→ ビルド成果物を spin-fileserver が配信
 - **DB**: PostgreSQL (CNPG `rss-pg`, `rssreader` DB) — TLS 検証あり
 - **認証**: Kanidm OIDC via oauth2-proxy
 - **ランタイム**: SpinKube (containerd-shim-spin on Talos)
@@ -95,7 +97,7 @@ Issue はフェーズとリポジトリのラベルで分類:
 
 ## 注意事項
 
-- **PUBLIC リポジトリではない** — private だが、機密値はコミットしない習慣を維持
+- **PUBLIC リポジトリ** — 機密値を絶対にコミットしない
 - Spin の cron trigger は SpinKube 非対応 → command trigger + K8s CronJob を使う
 - **フィード取得は HTTPS のみ**。`fetcher/spin.toml` の `allowed_outbound_hosts` に
   `http://*:80` を戻しても、home-cluster の CNP が world:443 しか開けていないので
