@@ -16,6 +16,20 @@ on:
 
 # permissions を書かない理由は _build-rust.yml と同じ（呼び出し元の付与を
 # そのまま継承させる。`{}` を置くと release の packages: write が消える）。
+env:
+  # The ceiling is the node, not this runner. containerd-shim-spin v0.25.1 — its
+  # newest release, and the one the Talos `spin` extension carries — links Spin
+  # v4.0.1, so a component built by a newer CLI targets a runtime the cluster
+  # does not have. Left at the action's default `latest` this moved 4.0.2 ->
+  # 4.1.0 on its own between v0.1.4 and v0.1.5, with no diff to review.
+  #
+  # The `v` is added at the use site: the action pastes this straight into a
+  # release download URL, but the manager that maintains these pins strips the
+  # tag's leading v, so the file has to hold the bare version like every other
+  # pin here.
+  # renovate: datasource=github-releases depName=spinframework/spin
+  SPIN_CLI_VERSION: "4.0.2"
+
 jobs:
   build-ui: # zizmor: ignore[excessive-permissions] reusable workflow — permissions come from the caller job (see comment above)
     name: build ui
@@ -47,8 +61,15 @@ jobs:
         with:
           node-version: 24
 
+      # The ceiling is the node, not this runner. containerd-shim-spin v0.25.1 —
+      # the newest release, and the one baked into the Talos `spin` extension —
+      # links Spin v4.0.1, so a component built by a newer CLI is built for a
+      # runtime the cluster does not have. Left at the default `latest` this
+      # step moved 4.0.2 -> 4.1.0 on its own between v0.1.4 and v0.1.5, with no
+      # diff to review. Raise this only when the shim raises its own.
       - uses: fermyon/actions/spin/setup@8849a6c41270af8e9f60f371982eddf33b8e35c9 # v1.0.12
         with:
+          version: v${{ env.SPIN_CLI_VERSION }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build UI

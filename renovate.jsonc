@@ -76,6 +76,24 @@
   "packageRules": [
     {
       "description": [
+        "Both of these are capped by the node, not by this repository.",
+        "containerd-shim-spin v0.25.1 — its newest release, 2026-06-12, and the one",
+        "the Talos `spin` extension carries — links Spin v4.0.1. A component built",
+        "against a newer runtime loads on nobody's node.",
+        "This was not theoretical: v0.1.5 took spin-sdk 7 (#113, merged as a plain",
+        "bump) and, because the setup action was left at `latest`, Spin CLI 4.1.0 as",
+        "well. All three Rust services exited 137 the second they started, with no",
+        "logs anywhere. spin-sdk 6 went in the same way once — #41 was closed",
+        "unmerged and the major landed later as the migration in #82.",
+        "Lift each ceiling when containerd-shim-spin ships a release that links the",
+        "newer Spin, and treat the sdk major as a migration, not a bump."
+      ],
+      "matchPackageNames": ["spin-sdk", "spinframework/spin"],
+      "matchUpdateTypes": ["major", "minor"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": [
         "First-party code does not soak. minimumReleaseAge buys time for someone",
         "else to notice a poisoned release before we take it; there is no someone",
         "else here — we wrote it, reviewed it and merged it. Waiting three days on",
