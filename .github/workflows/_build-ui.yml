@@ -75,4 +75,4 @@ jobs:
           fi
           spin registry push \
             -f "ui/spin.toml" \
-            "ghcr.io/tsuguya/home-rss-ui:${TAG}"
+            "ghcr.io/tsuguya-hc/home-rss-ui:${TAG}"
