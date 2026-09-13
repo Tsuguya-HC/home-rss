@@ -124,6 +124,26 @@
       "minimumReleaseAge": "0"
     },
     {
+      "description": [
+        "pnpm 12 rejects `pnpm update --no-save` up front whenever minimumReleaseAge",
+        "is set explicitly and strict mode is on, before it resolves anything",
+        "(pnpm#14835). Renovate refreshes this lock file exactly that way, so every",
+        "npm update here — security fixes included — fails in renovate/artifacts.",
+        "pnpm 11 raises the same error only when an immature version was actually",
+        "picked, which is the behaviour the cooldown in ui/pnpm-workspace.yaml is",
+        "written against.",
+        "The fix (pnpm#14842) is merged but unreleased; neither 12.4.1 nor 11.27.0",
+        "carries it yet. Hold the major on the Dependency Dashboard instead of",
+        "excluding it outright, so a 12.x release that contains the fix still shows",
+        "up and can be approved there. Do not answer this by turning",
+        "minimumReleaseAgeStrict off: that makes pnpm fall back to an immature",
+        "version instead of refusing it."
+      ],
+      "matchDepNames": ["pnpm"],
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
       // Both build jobs compile against the bump, so a breaking change fails CI
       // before it can merge. Major updates still go to a human.
       "matchUpdateTypes": ["patch", "minor"],
