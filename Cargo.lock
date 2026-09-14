@@ -395,7 +395,6 @@ name = "home-rss-fetcher"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "feed-rs",
  "home-rss-shared",
  "spin-sdk",
 ]
@@ -418,6 +417,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "feed-rs",
  "serde",
  "serde_json",
  "spin-sdk",

@@ -10,4 +10,3 @@ crate-type = ["cdylib"]
 spin-sdk = { workspace = true }
 anyhow = { workspace = true }
 home-rss-shared = { path = "../shared" }
-feed-rs = { workspace = true }
