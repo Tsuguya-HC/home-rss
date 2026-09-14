@@ -88,10 +88,13 @@ export default function App() {
     })
 
   const handleAddFeed = async (url: string) => {
-    await withError(async () => {
-      await api.addFeed(url)
-      await loadFeeds()
-    })
+    // 追加と同時に取得が走る。失敗は AddFeedModal 内で表示するため
+    // withError を使わずそのまま投げる
+    const feed = await api.addFeed(url)
+    await loadFeeds()
+    setSelectedFeedId(feed.id)
+    setSelectedArticle(null)
+    setMobileView('list')
   }
 
   const handleDeleteFeed = async (id: string) => {

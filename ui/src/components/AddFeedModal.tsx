@@ -8,13 +8,17 @@ interface AddFeedModalProps {
 export function AddFeedModal({ onAdd, onClose }: AddFeedModalProps) {
   const [url, setUrl] = useState('')
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!url.trim()) return
     setLoading(true)
+    setError(null)
     try {
       await onAdd(url.trim())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
     }
@@ -34,6 +38,7 @@ export function AddFeedModal({ onAdd, onClose }: AddFeedModalProps) {
             autoFocus
             required
           />
+          {error && <p className="modal-error">{error}</p>}
           <div className="modal-actions">
             <button type="button" className="btn btn--secondary" onClick={onClose}>
               キャンセル

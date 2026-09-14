@@ -1,5 +1,6 @@
 use anyhow::Result;
 use home_rss_shared::db;
+use home_rss_shared::feed::{FetchFailure, fetch_and_store};
 use home_rss_shared::http::{Resp, empty, json};
 use home_rss_shared::models::{Article, CreateFeedRequest, Feed};
 use quick_xml::Reader;
@@ -115,28 +116,63 @@ async fn add_feed(req: Request) -> Result<Resp> {
     };
 
     let conn = db::connect().await?;
+    // (xmax = 0) is true only for a row this INSERT actually created; on
+    // conflict the row was updated, which stamps its xmax. Drives the
+    // rollback below so a failed add never leaves an empty feed behind,
+    // while a fetch failure for a pre-existing feed keeps it.
     let rows = conn
         .query(
             "INSERT INTO feeds (url) VALUES ($1) \
              ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
              RETURNING id::text, url, title, site_url, etag, last_modified, \
              EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
+             EXTRACT(EPOCH FROM created_at)::bigint, \
+             (xmax = 0) AS inserted",
             vec![ParameterValue::Str(create_req.url)],
         )
         .await?
         .collect()
         .await?;
 
-    match rows.first() {
-        Some(row) => {
-            let feed = row_to_feed(row)?;
-            Ok(json(StatusCode::CREATED, serde_json::to_string(&feed)?))
+    let row = match rows.first() {
+        Some(row) => row,
+        None => {
+            return Ok(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to insert feed",
+            ));
         }
-        None => Ok(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to insert feed",
-        )),
+    };
+    let inserted = bool::decode(&row[8])?;
+    let feed = row_to_feed(row)?;
+
+    match fetch_and_store(
+        &conn,
+        &feed.id,
+        &feed.url,
+        feed.etag.as_deref(),
+        feed.last_modified.as_deref(),
+    )
+    .await
+    {
+        Ok(_) => Ok(json(StatusCode::CREATED, serde_json::to_string(&feed)?)),
+        Err(e) => {
+            let status = match e.downcast_ref::<FetchFailure>() {
+                Some(FetchFailure::Unreachable { .. }) => StatusCode::BAD_GATEWAY,
+                Some(FetchFailure::Unparsable { .. }) => StatusCode::UNPROCESSABLE_ENTITY,
+                // DB and other internal failures keep the row and report 500
+                None => return Err(e),
+            };
+            eprintln!("home-rss-server: immediate fetch failed: {e:#}");
+            if inserted {
+                conn.execute(
+                    "DELETE FROM feeds WHERE id = $1",
+                    vec![ParameterValue::Uuid(feed.id.to_owned())],
+                )
+                .await?;
+            }
+            Ok(error_response(status, &e.to_string()))
+        }
     }
 }
 

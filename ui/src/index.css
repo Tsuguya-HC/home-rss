@@ -253,6 +253,11 @@ body {
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
+.modal-error {
+  color: var(--color-danger);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
 .modal-actions {
   display: flex;
   gap: 8px;
