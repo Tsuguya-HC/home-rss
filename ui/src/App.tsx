@@ -89,8 +89,10 @@ export default function App() {
 
   const handleAddFeed = async (url: string) => {
     await withError(async () => {
-      await api.addFeed(url)
+      const feed = await api.addFeed(url)
       await loadFeeds()
+      setSelectedFeedId(feed.id)
+      setSelectedArticle(null)
     })
   }
 

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use home_rss_shared::db;
+use home_rss_shared::fetch::{FetchError, fetch_and_store};
 use home_rss_shared::http::{Resp, empty, json};
 use home_rss_shared::models::{Article, CreateFeedRequest, Feed};
 use quick_xml::Reader;
@@ -121,13 +122,56 @@ async fn add_feed(req: Request) -> Result<Resp> {
              ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
              RETURNING id::text, url, title, site_url, etag, last_modified, \
              EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
+             EXTRACT(EPOCH FROM created_at)::bigint, (xmax = 0)",
             vec![ParameterValue::Str(create_req.url)],
         )
         .await?
         .collect()
         .await?;
 
+    let row = match rows.first() {
+        Some(row) => row,
+        None => {
+            return Ok(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to insert feed",
+            ));
+        }
+    };
+    let feed = row_to_feed(row)?;
+    let is_new = bool::decode(&row[8]).unwrap_or(false);
+
+    if let Err(e) = fetch_and_store(
+        &conn,
+        &feed.id,
+        &feed.url,
+        feed.etag.as_deref(),
+        feed.last_modified.as_deref(),
+    )
+    .await
+    {
+        if is_new {
+            conn.execute(
+                "DELETE FROM feeds WHERE id = $1",
+                vec![ParameterValue::Uuid(feed.id.clone())],
+            )
+            .await?;
+        }
+        let (status, prefix) = match e {
+            FetchError::Parse(_) => (StatusCode::UNPROCESSABLE_ENTITY, "feed could not be parsed"),
+            FetchError::Http(_) => (StatusCode::BAD_GATEWAY, "feed could not be fetched"),
+        };
+        return Ok(error_response(status, &format!("{prefix}: {e}")));
+    }
+
+    let rows = conn
+        .query(
+            format!("{FEED_SELECT} WHERE id = $1"),
+            vec![ParameterValue::Uuid(feed.id)],
+        )
+        .await?
+        .collect()
+        .await?;
     match rows.first() {
         Some(row) => {
             let feed = row_to_feed(row)?;
@@ -135,7 +179,7 @@ async fn add_feed(req: Request) -> Result<Resp> {
         }
         None => Ok(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to insert feed",
+            "failed to reload feed",
         )),
     }
 }

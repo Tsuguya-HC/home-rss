@@ -14,7 +14,10 @@ component = "server"
 
 [component.server]
 source = "../target/wasm32-wasip1/release/home_rss_server.wasm"
-allowed_outbound_hosts = ["postgres://*:5432"]
+# POST /api/feeds がその場でフィードを取得するため、fetcher と同じく HTTPS の
+# outbound が必要。平文フィードはアプリ層でも拒否する (shared::fetch::require_https)。
+# CNP が world:443 しか開けていない点は fetcher と共通。
+allowed_outbound_hosts = ["postgres://*:5432", "https://*:443"]
 [component.server.variables]
 db_url = "{{ db_url }}"
 db_ca_root = "{{ db_ca_root }}"
