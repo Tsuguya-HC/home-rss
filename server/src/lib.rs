@@ -1,5 +1,6 @@
 use anyhow::Result;
 use home_rss_shared::db;
+use home_rss_shared::feed::{self, Fetched};
 use home_rss_shared::http::{Resp, empty, json};
 use home_rss_shared::models::{Article, CreateFeedRequest, Feed};
 use quick_xml::Reader;
@@ -114,30 +115,72 @@ async fn add_feed(req: Request) -> Result<Resp> {
         Err(_) => return Ok(error_response(StatusCode::BAD_REQUEST, "invalid JSON body")),
     };
 
+    let url = create_req.url.trim();
+    if let Err(e) = feed::validate_url(url) {
+        return Ok(error_response(StatusCode::BAD_REQUEST, &e.to_string()));
+    }
+
+    // Fetched before anything is written, so a URL that cannot be reached or
+    // parsed is reported now rather than stored and left for the periodic
+    // fetcher to fail against forever. The articles are stored before the
+    // response, so the UI can show them as soon as the add returns. These
+    // writes are not a transaction — the SDK cannot open one — so a database
+    // failure midway can leave a feed whose articles the next scheduled fetch
+    // completes.
+    let fetched = match feed::fetch(url, None, None).await {
+        Ok(fetched) => fetched,
+        Err(e) => {
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("could not fetch feed: {e:#}"),
+            ));
+        }
+    };
+
     let conn = db::connect().await?;
     let rows = conn
         .query(
             "INSERT INTO feeds (url) VALUES ($1) \
              ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
-             RETURNING id::text, url, title, site_url, etag, last_modified, \
-             EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
-            vec![ParameterValue::Str(create_req.url)],
+             RETURNING id::text",
+            vec![ParameterValue::Str(url.to_owned())],
         )
         .await?
         .collect()
         .await?;
 
-    match rows.first() {
-        Some(row) => {
-            let feed = row_to_feed(row)?;
-            Ok(json(StatusCode::CREATED, serde_json::to_string(&feed)?))
-        }
-        None => Ok(error_response(
+    let Some(row) = rows.first() else {
+        return Ok(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to insert feed",
-        )),
+        ));
+    };
+    let id = String::decode(&row[0])?;
+
+    if let Fetched::Modified(parsed) = &fetched {
+        feed::store(&conn, &id, parsed).await?;
     }
+
+    // Read the row back rather than reuse the insert's RETURNING: the fetch has
+    // just written the title, site_url, etag and last_fetched_at, and the
+    // response is supposed to describe the feed as it now stands.
+    let rows = conn
+        .query(
+            format!("{FEED_SELECT} WHERE id = $1"),
+            vec![ParameterValue::Uuid(id)],
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let Some(row) = rows.first() else {
+        return Ok(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to read back feed",
+        ));
+    };
+    let created = row_to_feed(row)?;
+    Ok(json(StatusCode::CREATED, serde_json::to_string(&created)?))
 }
 
 async fn delete_feed(id: &str) -> Result<Resp> {
@@ -242,7 +285,16 @@ async fn import_opml(req: Request) -> Result<Resp> {
 
     let conn = db::connect().await?;
     let mut imported = 0u64;
+    let mut skipped = 0u64;
     for url in &urls {
+        // Same rule as POST /api/feeds: an http URL cannot be fetched through
+        // the cluster egress (world:443 only), so storing it would only give
+        // the periodic fetcher a feed to hang on at every run.
+        if feed::validate_url(url).is_err() {
+            skipped += 1;
+            continue;
+        }
+
         imported += conn
             .execute(
                 "INSERT INTO feeds (url) VALUES ($1) ON CONFLICT (url) DO NOTHING",
@@ -251,7 +303,7 @@ async fn import_opml(req: Request) -> Result<Resp> {
             .await?;
     }
 
-    json_ok(format!(r#"{{"imported":{imported}}}"#))
+    json_ok(format!(r#"{{"imported":{imported},"skipped":{skipped}}}"#))
 }
 
 fn parse_opml(data: &[u8]) -> Result<Vec<String>> {

@@ -14,7 +14,7 @@ rss.infra.tgy.io → oauth2-proxy → server (http trigger) ─── API ──
 
 | サービス | trigger | 役割 | K8s リソース | OCI イメージ |
 |---------|---------|------|-------------|-------------|
-| server | http | REST API | SpinApp | `ghcr.io/tsuguya-hc/home-rss-server` |
+| server | http | REST API（フィード追加時はその場で取得も行う） | SpinApp | `ghcr.io/tsuguya-hc/home-rss-server` |
 | ui | http | Web UI (React SPA) + 静的ファイル (spin-fileserver) | SpinApp | `ghcr.io/tsuguya-hc/home-rss-ui` |
 | fetcher | command | フィード収集 → DB 書き込み | CronJob | `ghcr.io/tsuguya-hc/home-rss-fetcher` |
 | cleaner | command | 古い記事の削除 | CronJob | `ghcr.io/tsuguya-hc/home-rss-cleaner` |
@@ -99,6 +99,12 @@ Issue はフェーズとリポジトリのラベルで分類:
 
 - **PUBLIC リポジトリ** — 機密値を絶対にコミットしない
 - Spin の cron trigger は SpinKube 非対応 → command trigger + K8s CronJob を使う
+- **`POST /api/feeds` は登録と取得を 1 操作で行う**。server が `shared/src/feed.rs`
+  （fetcher と共通）でその場でフィードを取得し、記事を保存してから 201 を返す。
+  取得・パースに失敗したら 502 を返し、フィードは登録しない — つまり
+  「追加できた」なら記事も入っている。このため **server にも fetcher と同じ
+  world:443 の egress が要る**（`server/spin.toml` の `allowed_outbound_hosts` と
+  home-cluster の CNP を揃えること）。URL は `https://` のみ受け付ける
 - **フィード取得は HTTPS のみ**。`fetcher/spin.toml` の `allowed_outbound_hosts` に
   `http://*:80` を戻しても、home-cluster の CNP が world:443 しか開けていないので
   平文フィードは失敗ではなくハングする。開けるなら両方を揃えて直すこと

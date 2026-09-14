@@ -14,7 +14,11 @@ component = "server"
 
 [component.server]
 source = "../target/wasm32-wasip1/release/home_rss_server.wasm"
-allowed_outbound_hosts = ["postgres://*:5432"]
+# postgres for the API, https because POST /api/feeds fetches the feed it is
+# handed (shared/src/feed.rs). Same constraint as the fetcher: the
+# CiliumNetworkPolicy in home-cluster has to open world:443 for this workload
+# too, and HTTPS only — a plaintext feed would hang instead of failing.
+allowed_outbound_hosts = ["postgres://*:5432", "https://*:443"]
 [component.server.variables]
 db_url = "{{ db_url }}"
 db_ca_root = "{{ db_ca_root }}"

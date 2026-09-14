@@ -44,7 +44,7 @@ export const api = {
     request<void>('/api/articles/read-all', { method: 'POST' }),
 
   importOpml: (file: File) =>
-    request<{ imported: number }>('/api/import/opml', {
+    request<{ imported: number; skipped: number }>('/api/import/opml', {
       method: 'POST',
       headers: { 'Content-Type': 'application/xml' },
       body: file,

@@ -42,16 +42,22 @@ export default function App() {
     setFeeds(feeds)
   }, [loadUnreadCounts])
 
-  const loadArticles = useCallback(async () => {
-    setLoadingArticles(true)
-    try {
-      const articles = await api.getArticles(selectedFeedId, showUnreadOnly)
-      setArticles(articles)
-      setReadIds(new Set())
-    } finally {
-      setLoadingArticles(false)
-    }
-  }, [selectedFeedId, showUnreadOnly])
+  // `feedId` is passed explicitly right after a feed is added: the state update
+  // that selects it has not been applied yet, so the callback's own
+  // `selectedFeedId` is still the previous one there.
+  const loadArticles = useCallback(
+    async (feedId: string | null = selectedFeedId) => {
+      setLoadingArticles(true)
+      try {
+        const articles = await api.getArticles(feedId, showUnreadOnly)
+        setArticles(articles)
+        setReadIds(new Set())
+      } finally {
+        setLoadingArticles(false)
+      }
+    },
+    [selectedFeedId, showUnreadOnly],
+  )
 
   useEffect(() => {
     withError(loadFeeds)
@@ -89,8 +95,14 @@ export default function App() {
 
   const handleAddFeed = async (url: string) => {
     await withError(async () => {
-      await api.addFeed(url)
-      await loadFeeds()
+      // The server fetches the feed before answering, so its articles are
+      // already stored by the time this resolves. Select the feed and reload,
+      // so they are on screen instead of waiting for the next poll.
+      const feed = await api.addFeed(url)
+      setSelectedFeedId(feed.id)
+      setSelectedArticle(null)
+      setMobileView('list')
+      await Promise.all([loadFeeds(), loadArticles(feed.id)])
     })
   }
 
