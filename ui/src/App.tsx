@@ -89,8 +89,45 @@ export default function App() {
 
   const handleAddFeed = async (url: string) => {
     await withError(async () => {
-      await api.addFeed(url)
-      await loadFeeds()
+      // 即時取得に失敗してもフィード行自体は DB に残るため、
+      // エラー時も一覧を更新して「登録済み」が見えるようにする。
+      let addFeedError: unknown = null
+      try {
+        await api.addFeed(url)
+      } catch (e) {
+        addFeedError = e
+      }
+      // loadFeeds/loadArticles は個別に catch し、片方が失敗してももう片方は
+      // 必ず試みる（#106 R13）。addFeed・loadFeeds・loadArticles を別変数で
+      // 持つのは、連結メッセージの前置きが実際に失敗した処理と食い違わない
+      // ようにするため（#106 U11: 以前は loadFeeds の失敗が addFeed の失敗と
+      // 同じ変数に入っており、追加自体は成功したのに失敗したかのような文面に
+      // なっていた）。
+      let loadFeedsError: unknown = null
+      let loadArticlesError: unknown = null
+      await loadFeeds().catch((e: unknown) => {
+        loadFeedsError = e
+      })
+      await loadArticles().catch((e: unknown) => {
+        loadArticlesError = e
+      })
+
+      const messageOf = (e: unknown) => (e instanceof Error ? e.message : String(e))
+
+      // loadArticles はこの PR の核心（追加直後の記事をすぐ見せる）そのものな
+      // ので、addFeed のエラーの陰に隠して不可視化しない。両方失敗した場合は
+      // 連結して伝える（#106 R15）。
+      if (addFeedError && loadArticlesError) {
+        throw new Error(`${messageOf(addFeedError)}（記事一覧の再読み込みにも失敗しました）`)
+      }
+      if (addFeedError) throw addFeedError
+      if (loadFeedsError && loadArticlesError) {
+        throw new Error(
+          `フィード一覧・記事一覧の再読み込みに失敗しました: ${messageOf(loadFeedsError)}`,
+        )
+      }
+      if (loadFeedsError) throw loadFeedsError
+      if (loadArticlesError) throw loadArticlesError
     })
   }
 
@@ -108,8 +145,26 @@ export default function App() {
 
   const handleImportOpml = async (file: File) => {
     await withError(async () => {
-      await api.importOpml(file)
+      const result = await api.importOpml(file)
       await loadFeeds()
+      // ガードが入る前は OPML の全エントリが無条件でインポートされていた。
+      // 弾かれた件数を無言で捨てると、内部ホスト向けや壊れたエントリが
+      // エラーも件数も出ずに漏れてしまう (#106 U2)。imported + already_present
+      // + skipped_invalid + skipped_blocked が入力件数と一致するように
+      // already_present も併記する (#106 U8)。
+      if (result.skipped_invalid > 0 || result.skipped_blocked > 0) {
+        const reasons: string[] = []
+        if (result.already_present > 0) {
+          reasons.push(`${result.already_present}件は登録済みのため`)
+        }
+        if (result.skipped_invalid > 0) {
+          reasons.push(`${result.skipped_invalid}件は不正なエントリのため`)
+        }
+        if (result.skipped_blocked > 0) {
+          reasons.push(`${result.skipped_blocked}件は内部ホスト宛のため`)
+        }
+        throw new Error(`${result.imported}件をインポートしました（${reasons.join('、')}スキップ）`)
+      }
     })
   }
 

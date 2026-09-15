@@ -11,5 +11,5 @@ spin-sdk = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-home-rss-shared = { path = "../shared" }
+home-rss-shared = { path = "../shared", features = ["feed"] }
 quick-xml = { workspace = true }

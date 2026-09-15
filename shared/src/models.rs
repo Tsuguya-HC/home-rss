@@ -15,7 +15,7 @@ pub struct ArticleListQuery {
 
 // --- DB models ---
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Feed {
     pub id: String,
     pub url: String,
