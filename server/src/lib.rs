@@ -52,23 +52,26 @@ fn error_response(status: StatusCode, message: &str) -> Resp {
 /// POST /api/feeds の追加直後取得の結果 → HTTP 応答への写像 (#106)。
 /// 取得の失敗（到達不能・パース不能）は追加操作の結果としてユーザーに伝え、
 /// DB insert 後の成功パスのみ 201 を使う。
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 enum ImmediateFetchOutcome {
-    /// その場で取得でき、記事が入った（通常の 201 応答）
-    Fetched,
+    /// その場で取得でき、記事が入った（通常の 201 応答）。
+    /// 応答に含めるのは取得後の最新行（RETURNING の結果）。
+    Fetched(Feed),
     /// 到達不能など、記事を取得できなかった（ユーザーに失敗として伝える）
     FetchFailed,
     /// 本文がフィードとしてパース不能（ユーザーに失敗として伝える）
     Unparseable,
 }
 
-fn immediate_fetch_response(feed: &Feed, outcome: &ImmediateFetchOutcome) -> Resp {
-    let body = match serde_json::to_string(feed) {
-        Ok(b) => b,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "failed to serialize feed"),
-    };
+fn immediate_fetch_response(outcome: &ImmediateFetchOutcome) -> Resp {
     match outcome {
-        ImmediateFetchOutcome::Fetched => json(StatusCode::CREATED, body),
+        ImmediateFetchOutcome::Fetched(feed) => match serde_json::to_string(feed) {
+            Ok(body) => json(StatusCode::CREATED, body),
+            Err(_) => error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to serialize feed",
+            ),
+        },
         ImmediateFetchOutcome::FetchFailed => {
             error_response(StatusCode::BAD_GATEWAY, "failed to fetch feed")
         }
@@ -163,7 +166,7 @@ async fn add_feed(req: Request) -> Result<Resp> {
             let feed = row_to_feed(row)?;
             let conn = db::connect().await?;
             let outcome = immediate_fetch(&conn, &feed).await;
-            Ok(immediate_fetch_response(&feed, &outcome))
+            Ok(immediate_fetch_response(&outcome))
         }
         None => Ok(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -174,10 +177,7 @@ async fn add_feed(req: Request) -> Result<Resp> {
 
 /// フィード追加直後の即時取得 (#106)。`process_feed` 相当を server 側で実行し、
 /// 結果を呼び出し側がユーザーへ通知できる形で返す。失敗しても追加自体は残す。
-async fn immediate_fetch(
-    conn: &spin_sdk::pg::Connection,
-    feed: &Feed,
-) -> ImmediateFetchOutcome {
+async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> ImmediateFetchOutcome {
     use spin_sdk::http::{EmptyBody, Request, Response, send};
 
     let req = match Request::get(&feed.url)
@@ -185,22 +185,42 @@ async fn immediate_fetch(
         .body(EmptyBody::new())
     {
         Ok(r) => r,
-        Err(_) => return ImmediateFetchOutcome::FetchFailed,
+        Err(e) => {
+            eprintln!(
+                "immediate_fetch {}: failed to build request: {e:#}",
+                feed.url
+            );
+            return ImmediateFetchOutcome::FetchFailed;
+        }
     };
     let resp: Response = match send(req).await {
         Ok(r) => r,
-        Err(_) => return ImmediateFetchOutcome::FetchFailed,
+        Err(e) => {
+            eprintln!("immediate_fetch {}: request failed: {e:#}", feed.url);
+            return ImmediateFetchOutcome::FetchFailed;
+        }
     };
     if resp.status() != StatusCode::OK {
+        eprintln!(
+            "immediate_fetch {}: unexpected HTTP status {}",
+            feed.url,
+            resp.status()
+        );
         return ImmediateFetchOutcome::FetchFailed;
     }
     let body = match resp.into_body().bytes().await {
         Ok(b) => b,
-        Err(_) => return ImmediateFetchOutcome::FetchFailed,
+        Err(e) => {
+            eprintln!("immediate_fetch {}: failed to read body: {e:#}", feed.url);
+            return ImmediateFetchOutcome::FetchFailed;
+        }
     };
     let parsed = match parser::parse(body.as_ref()) {
         Ok(f) => f,
-        Err(_) => return ImmediateFetchOutcome::Unparseable,
+        Err(e) => {
+            eprintln!("immediate_fetch {}: unparseable feed: {e:#}", feed.url);
+            return ImmediateFetchOutcome::Unparseable;
+        }
     };
 
     let feed_title = parsed.title.as_ref().map(|t| t.content.clone());
@@ -225,7 +245,7 @@ async fn immediate_fetch(
         let published_at: Option<String> =
             entry.published.or(entry.updated).map(|dt| dt.to_rfc3339());
 
-        if conn
+        if let Err(e) = conn
             .execute(
                 "INSERT INTO articles (feed_id, url, title, content, author, published_at) \
                  VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz) ON CONFLICT DO NOTHING",
@@ -239,15 +259,21 @@ async fn immediate_fetch(
                 ],
             )
             .await
-            .is_err()
         {
+            eprintln!(
+                "immediate_fetch {}: failed to insert article: {e:#}",
+                feed.url
+            );
             return ImmediateFetchOutcome::FetchFailed;
         }
     }
 
-    if conn
-        .execute(
-            "UPDATE feeds SET title = $1, site_url = $2, last_fetched_at = NOW() WHERE id = $3",
+    match conn
+        .query(
+            "UPDATE feeds SET title = $1, site_url = $2, last_fetched_at = NOW() WHERE id = $3 \
+             RETURNING id::text, url, title, site_url, etag, last_modified, \
+             EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
+             EXTRACT(EPOCH FROM created_at)::bigint",
             vec![
                 feed_title.into(),
                 site_url.into(),
@@ -255,12 +281,40 @@ async fn immediate_fetch(
             ],
         )
         .await
-        .is_err()
     {
-        return ImmediateFetchOutcome::FetchFailed;
+        Ok(rows) => match rows.collect().await {
+            Ok(rows) => match rows.first() {
+                Some(row) => match row_to_feed(row) {
+                    Ok(updated) => ImmediateFetchOutcome::Fetched(updated),
+                    Err(e) => {
+                        eprintln!(
+                            "immediate_fetch {}: failed to decode updated feed: {e:#}",
+                            feed.url
+                        );
+                        ImmediateFetchOutcome::FetchFailed
+                    }
+                },
+                None => {
+                    eprintln!(
+                        "immediate_fetch {}: UPDATE RETURNING returned no rows",
+                        feed.url
+                    );
+                    ImmediateFetchOutcome::FetchFailed
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "immediate_fetch {}: failed to collect updated feed: {e:#}",
+                    feed.url
+                );
+                ImmediateFetchOutcome::FetchFailed
+            }
+        },
+        Err(e) => {
+            eprintln!("immediate_fetch {}: failed to update feed: {e:#}", feed.url);
+            ImmediateFetchOutcome::FetchFailed
+        }
     }
-
-    ImmediateFetchOutcome::Fetched
 }
 
 async fn delete_feed(id: &str) -> Result<Resp> {
@@ -506,24 +560,40 @@ mod tests {
     #[test]
     fn fetched_feed_returns_created() {
         use super::{ImmediateFetchOutcome, immediate_fetch_response};
-        let feed = test_feed();
-        let resp = immediate_fetch_response(&feed, &ImmediateFetchOutcome::Fetched);
+        let resp = immediate_fetch_response(&ImmediateFetchOutcome::Fetched(test_feed()));
         assert_eq!(resp.status(), spin_sdk::http::StatusCode::CREATED);
+    }
+
+    #[test]
+    fn fetched_response_body_reflects_updated_feed() {
+        use super::{ImmediateFetchOutcome, immediate_fetch_response};
+        let mut updated = test_feed();
+        updated.title = Some("Example Feed".to_owned());
+        updated.site_url = Some("https://example.com/".to_owned());
+        updated.last_fetched_at = Some(1_757_894_400);
+        let resp = immediate_fetch_response(&ImmediateFetchOutcome::Fetched(updated));
+        let body = resp
+            .into_body()
+            .into_inner()
+            .expect("immediate_fetch_response body");
+        let feed: home_rss_shared::models::Feed = serde_json::from_slice(body.as_ref()).unwrap();
+        // Fetched が運ぶのは取得後の最新行。更新前の None のまま返してはならない。
+        assert_eq!(feed.title.as_deref(), Some("Example Feed"));
+        assert_eq!(feed.site_url.as_deref(), Some("https://example.com/"));
+        assert_eq!(feed.last_fetched_at, Some(1_757_894_400));
     }
 
     #[test]
     fn fetch_failure_is_surfaced_not_created() {
         use super::{ImmediateFetchOutcome, immediate_fetch_response};
-        let feed = test_feed();
-        let resp = immediate_fetch_response(&feed, &ImmediateFetchOutcome::FetchFailed);
+        let resp = immediate_fetch_response(&ImmediateFetchOutcome::FetchFailed);
         assert_ne!(resp.status(), spin_sdk::http::StatusCode::CREATED);
     }
 
     #[test]
     fn unparseable_feed_is_surfaced_not_created() {
         use super::{ImmediateFetchOutcome, immediate_fetch_response};
-        let feed = test_feed();
-        let resp = immediate_fetch_response(&feed, &ImmediateFetchOutcome::Unparseable);
+        let resp = immediate_fetch_response(&ImmediateFetchOutcome::Unparseable);
         assert_ne!(resp.status(), spin_sdk::http::StatusCode::CREATED);
     }
 }
