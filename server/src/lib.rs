@@ -1,13 +1,14 @@
 use anyhow::Result;
+use feed_rs::parser;
 use home_rss_shared::db;
 use home_rss_shared::http::{Resp, empty, json};
 use home_rss_shared::models::{Article, CreateFeedRequest, Feed};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use spin_sdk::http::body::IncomingBodyExt;
-use spin_sdk::http::{Method, Request, StatusCode};
+use spin_sdk::http::{EmptyBody, Method, Request, Response, StatusCode, send};
 use spin_sdk::http_service;
-use spin_sdk::pg::{Decode, ParameterValue, Row};
+use spin_sdk::pg::{Connection, Decode, ParameterValue, Row};
 
 #[http_service]
 async fn handle(req: Request) -> Resp {
@@ -46,6 +47,35 @@ fn json_ok(body: impl Into<String>) -> Result<Resp> {
 fn error_response(status: StatusCode, message: &str) -> Resp {
     let body = serde_json::to_string(message).unwrap_or_else(|_| "\"error\"".to_owned());
     json(status, format!(r#"{{"error":{body}}}"#))
+}
+
+/// Outcome of an immediate (synchronous) fetch attempt for a single feed.
+///
+/// Pure decision logic for issue #106: given the fetch result, what must
+/// `POST /api/feeds` report back? Mapping to HTTP happens in
+/// [`add_feed_status`]. Kept separate from I/O so it is unit-testable
+/// without DB or network.
+#[derive(Debug, PartialEq, Eq)]
+enum ImmediateFetchOutcome {
+    /// Feed fetched and parsed; articles stored.
+    Fetched,
+    /// Transport-level or HTTP-error failure (unreachable, non-2xx, timeout).
+    Unreachable,
+    /// Bytes arrived but no usable entries (parse failure or empty feed).
+    Unparseable,
+}
+
+/// Maps an immediate-fetch outcome to the `POST /api/feeds` response status.
+/// Per issue #106 a fetch failure must reach the user as the result of the
+/// add operation: success stays 201 Created, any fetch failure is an error.
+/// An unreachable upstream is a gateway problem (502); bytes that arrive but
+/// cannot be turned into entries are a problem with the given feed (422).
+fn add_feed_status(outcome: &ImmediateFetchOutcome) -> StatusCode {
+    match outcome {
+        ImmediateFetchOutcome::Fetched => StatusCode::CREATED,
+        ImmediateFetchOutcome::Unreachable => StatusCode::BAD_GATEWAY,
+        ImmediateFetchOutcome::Unparseable => StatusCode::UNPROCESSABLE_ENTITY,
+    }
 }
 
 fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
@@ -128,16 +158,188 @@ async fn add_feed(req: Request) -> Result<Resp> {
         .collect()
         .await?;
 
-    match rows.first() {
+    let (feed_id, feed_url) = match rows.first() {
         Some(row) => {
             let feed = row_to_feed(row)?;
-            Ok(json(StatusCode::CREATED, serde_json::to_string(&feed)?))
+            (feed.id.clone(), feed.url.clone())
         }
-        None => Ok(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to insert feed",
-        )),
+        None => {
+            return Ok(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to insert feed",
+            ));
+        }
+    };
+
+    // Issue #106: fetch the new feed right away so articles are visible
+    // immediately instead of only after the next fetcher CronJob run.
+    // A fetch failure is reported as the result of this add operation;
+    // the feed row stays so the periodic fetcher can retry it later.
+    // Transport/parse problems are classified inside immediate_fetch;
+    // only genuine internal (DB) errors propagate as Err here (-> 500).
+    let outcome = immediate_fetch(&conn, &feed_id, &feed_url).await?;
+
+    let rows = conn
+        .query(
+            "SELECT id::text, url, title, site_url, etag, last_modified, \
+             EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
+             EXTRACT(EPOCH FROM created_at)::bigint \
+             FROM feeds WHERE id = $1",
+            vec![ParameterValue::Uuid(feed_id)],
+        )
+        .await?
+        .collect()
+        .await?;
+    let feed = match rows.first() {
+        // Feed metadata (title, site_url) may have been filled in by the fetch.
+        Some(row) => row_to_feed(row)?,
+        None => {
+            return Ok(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read back feed",
+            ));
+        }
+    };
+
+    let status = add_feed_status(&outcome);
+    if outcome == ImmediateFetchOutcome::Fetched {
+        Ok(json(status, serde_json::to_string(&feed)?))
+    } else {
+        Ok(json(
+            status,
+            serde_json::to_string(&serde_json::json!({
+                "feed": feed,
+                "error": match outcome {
+                    ImmediateFetchOutcome::Unreachable =>
+                        "failed to fetch feed: unreachable or HTTP error",
+                    ImmediateFetchOutcome::Unparseable =>
+                        "failed to fetch feed: could not parse any entries",
+                    ImmediateFetchOutcome::Fetched => unreachable!(),
+                },
+            }))?,
+        ))
     }
+}
+
+/// Fetches a single feed immediately and stores its articles.
+///
+/// Same semantics as the periodic fetcher (`fetcher/src/lib.rs`): conditional
+/// GET, update feed metadata, insert entries with `ON CONFLICT DO NOTHING`.
+/// Classifies the result as [`ImmediateFetchOutcome`] so `add_feed` can
+/// report it. Transport problems and non-2xx statuses are `Unreachable`;
+/// bytes that `feed-rs` cannot parse, or that parse but yield no usable
+/// entries (and hence no visible articles), are `Unparseable`.
+async fn immediate_fetch(
+    conn: &Connection,
+    feed_id: &str,
+    url: &str,
+) -> Result<ImmediateFetchOutcome> {
+    let req = Request::get(url)
+        .header("user-agent", "home-rss-server/0.1")
+        .body(EmptyBody::new())?;
+    let resp: Response = match send(req).await {
+        Ok(resp) => resp,
+        Err(_) => return Ok(ImmediateFetchOutcome::Unreachable),
+    };
+
+    if resp.status() == StatusCode::NOT_MODIFIED {
+        return Ok(ImmediateFetchOutcome::Fetched);
+    }
+    if !resp.status().is_success() {
+        return Ok(ImmediateFetchOutcome::Unreachable);
+    }
+
+    let new_etag = header_string(&resp, "etag");
+    let new_last_modified = header_string(&resp, "last-modified");
+
+    let body = resp.into_body().bytes().await?;
+    let feed = match parser::parse(body.as_ref()) {
+        Ok(feed) => feed,
+        Err(_) => return Ok(ImmediateFetchOutcome::Unparseable),
+    };
+
+    let feed_title = feed.title.as_ref().map(|t| t.content.clone());
+    let site_url = feed.links.first().map(|l| l.href.clone());
+
+    let mut stored = 0u64;
+    for entry in &feed.entries {
+        let entry_url = match entry.links.first() {
+            Some(l) => &l.href,
+            None => continue,
+        };
+        let entry_title = entry
+            .title
+            .as_ref()
+            .map(|t| t.content.as_str())
+            .unwrap_or("(no title)");
+        let content = entry
+            .content
+            .as_ref()
+            .and_then(|c| c.body.as_deref())
+            .or_else(|| entry.summary.as_ref().map(|s| s.content.as_str()));
+        let author = entry.authors.first().map(|a| a.name.as_str());
+        let published_at: Option<String> =
+            entry.published.or(entry.updated).map(|dt| dt.to_rfc3339());
+
+        stored += conn
+            .execute(
+                "INSERT INTO articles (feed_id, url, title, content, author, published_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz) ON CONFLICT DO NOTHING",
+                vec![
+                    ParameterValue::Uuid(feed_id.to_owned()),
+                    entry_url.to_owned().into(),
+                    entry_title.to_owned().into(),
+                    content.map(str::to_owned).into(),
+                    author.map(str::to_owned).into(),
+                    published_at.into(),
+                ],
+            )
+            .await?;
+    }
+
+    if feed.entries.is_empty() || stored == 0 && article_count(conn, feed_id).await? == 0 {
+        // Parsed but nothing to show: either genuinely entry-less or every
+        // entry was unusable (no link). Report it as unparseable so the user
+        // knows the add did not produce articles.
+        return Ok(ImmediateFetchOutcome::Unparseable);
+    }
+
+    conn.execute(
+        "UPDATE feeds SET title = $1, site_url = $2, etag = $3, last_modified = $4, \
+         last_fetched_at = NOW() WHERE id = $5",
+        vec![
+            feed_title.into(),
+            site_url.into(),
+            new_etag.into(),
+            new_last_modified.into(),
+            ParameterValue::Uuid(feed_id.to_owned()),
+        ],
+    )
+    .await?;
+
+    Ok(ImmediateFetchOutcome::Fetched)
+}
+
+async fn article_count(conn: &Connection, feed_id: &str) -> Result<u64> {
+    let rows = conn
+        .query(
+            "SELECT COUNT(*)::bigint FROM articles WHERE feed_id = $1",
+            vec![ParameterValue::Uuid(feed_id.to_owned())],
+        )
+        .await?
+        .collect()
+        .await?;
+    match rows.first() {
+        Some(row) => Ok(i64::decode(&row[0])? as u64),
+        None => Ok(0),
+    }
+}
+
+fn header_string(resp: &Response, name: &str) -> Option<String> {
+    resp.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
 }
 
 async fn delete_feed(id: &str) -> Result<Resp> {
@@ -306,7 +508,34 @@ async fn get_stats() -> Result<Resp> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_opml;
+    use super::{ImmediateFetchOutcome, add_feed_status, parse_opml};
+    use spin_sdk::http::StatusCode;
+
+    #[test]
+    fn fetch_success_keeps_created() {
+        assert_eq!(
+            add_feed_status(&ImmediateFetchOutcome::Fetched),
+            StatusCode::CREATED
+        );
+    }
+
+    #[test]
+    fn unreachable_feed_is_reported_as_error() {
+        let status = add_feed_status(&ImmediateFetchOutcome::Unreachable);
+        assert!(
+            status.is_client_error() || status.is_server_error(),
+            "unreachable fetch must be an error status, got {status}"
+        );
+    }
+
+    #[test]
+    fn unparseable_feed_is_reported_as_error() {
+        let status = add_feed_status(&ImmediateFetchOutcome::Unparseable);
+        assert!(
+            status.is_client_error() || status.is_server_error(),
+            "unparseable fetch must be an error status, got {status}"
+        );
+    }
 
     #[test]
     fn extracts_urls_from_nested_and_self_closing_outlines() {

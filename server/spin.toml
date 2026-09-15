@@ -14,7 +14,9 @@ component = "server"
 
 [component.server]
 source = "../target/wasm32-wasip1/release/home_rss_server.wasm"
-allowed_outbound_hosts = ["postgres://*:5432"]
+# Immediate fetch on POST /api/feeds needs HTTPS egress (same HTTPS-only
+# rule as the fetcher: the CNP opens world:443 and nothing else).
+allowed_outbound_hosts = ["postgres://*:5432", "https://*:443"]
 [component.server.variables]
 db_url = "{{ db_url }}"
 db_ca_root = "{{ db_ca_root }}"

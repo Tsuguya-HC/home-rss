@@ -405,6 +405,7 @@ name = "home-rss-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "feed-rs",
  "home-rss-shared",
  "quick-xml 0.42.0",
  "serde",
