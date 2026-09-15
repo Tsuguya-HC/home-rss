@@ -1,6 +1,6 @@
 use anyhow::Result;
-use feed_rs::parser;
 use home_rss_shared::db;
+use home_rss_shared::feed::parse_feed_bytes;
 use home_rss_shared::http::{Resp, empty, json};
 use home_rss_shared::models::{Article, CreateFeedRequest, Feed};
 use quick_xml::Reader;
@@ -180,6 +180,22 @@ async fn add_feed(req: Request) -> Result<Resp> {
 async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> ImmediateFetchOutcome {
     use spin_sdk::http::{EmptyBody, Request, Response, send};
 
+    // ハング対策 (#106): 応答を返さないホストへの send はタイムアウト無しに待ち続ける。
+    // WASI の outbound HTTP にタイムアウト API が無いため、一定時間で打ち切って
+    // FetchFailed として返す。
+    const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+    async fn with_timeout<T>(
+        duration: std::time::Duration,
+        fut: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        use futures_util::FutureExt;
+        futures_util::select! {
+            result = fut.fuse() => Some(result),
+            _ = spin_sdk::time::sleep(duration).fuse() => None,
+        }
+    }
+
     let req = match Request::get(&feed.url)
         .header("user-agent", "home-rss-fetcher/0.1")
         .body(EmptyBody::new())
@@ -193,10 +209,14 @@ async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> Immedi
             return ImmediateFetchOutcome::FetchFailed;
         }
     };
-    let resp: Response = match send(req).await {
-        Ok(r) => r,
-        Err(e) => {
+    let resp: Response = match with_timeout(FETCH_TIMEOUT, send(req)).await {
+        Some(Ok(r)) => r,
+        Some(Err(e)) => {
             eprintln!("immediate_fetch {}: request failed: {e:#}", feed.url);
+            return ImmediateFetchOutcome::FetchFailed;
+        }
+        None => {
+            eprintln!("immediate_fetch {}: request timed out", feed.url);
             return ImmediateFetchOutcome::FetchFailed;
         }
     };
@@ -208,14 +228,18 @@ async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> Immedi
         );
         return ImmediateFetchOutcome::FetchFailed;
     }
-    let body = match resp.into_body().bytes().await {
-        Ok(b) => b,
-        Err(e) => {
+    let body = match with_timeout(FETCH_TIMEOUT, resp.into_body().bytes()).await {
+        Some(Ok(b)) => b,
+        Some(Err(e)) => {
             eprintln!("immediate_fetch {}: failed to read body: {e:#}", feed.url);
             return ImmediateFetchOutcome::FetchFailed;
         }
+        None => {
+            eprintln!("immediate_fetch {}: timed out reading body", feed.url);
+            return ImmediateFetchOutcome::FetchFailed;
+        }
     };
-    let parsed = match parser::parse(body.as_ref()) {
+    let parsed = match parse_feed_bytes(body.as_ref()) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("immediate_fetch {}: unparseable feed: {e:#}", feed.url);
@@ -223,39 +247,21 @@ async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> Immedi
         }
     };
 
-    let feed_title = parsed.title.as_ref().map(|t| t.content.clone());
-    let site_url = parsed.links.first().map(|l| l.href.clone());
+    let feed_title = parsed.title.clone();
+    let site_url = parsed.site_url.clone();
 
     for entry in &parsed.entries {
-        let entry_url = match entry.links.first() {
-            Some(l) => l.href.clone(),
-            None => continue,
-        };
-        let entry_title = entry
-            .title
-            .as_ref()
-            .map(|t| t.content.clone())
-            .unwrap_or_else(|| "(no title)".to_owned());
-        let content = entry
-            .content
-            .as_ref()
-            .and_then(|c| c.body.clone())
-            .or_else(|| entry.summary.as_ref().map(|s| s.content.clone()));
-        let author = entry.authors.first().map(|a| a.name.clone());
-        let published_at: Option<String> =
-            entry.published.or(entry.updated).map(|dt| dt.to_rfc3339());
-
         if let Err(e) = conn
             .execute(
                 "INSERT INTO articles (feed_id, url, title, content, author, published_at) \
                  VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz) ON CONFLICT DO NOTHING",
                 vec![
                     ParameterValue::Uuid(feed.id.clone()),
-                    entry_url.into(),
-                    entry_title.into(),
-                    content.into(),
-                    author.into(),
-                    published_at.into(),
+                    entry.url.clone().into(),
+                    entry.title.clone().into(),
+                    entry.content.clone().into(),
+                    entry.author.clone().into(),
+                    entry.published_at.clone().into(),
                 ],
             )
             .await

@@ -1,6 +1,6 @@
 use anyhow::Result;
-use feed_rs::parser;
 use home_rss_shared::db;
+use home_rss_shared::feed::parse_feed_bytes;
 use home_rss_shared::http::{Resp, text};
 use spin_sdk::http::body::IncomingBodyExt;
 use spin_sdk::http::{EmptyBody, Request, Response, StatusCode, send};
@@ -115,66 +115,11 @@ fn header_string(resp: &Response, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// POST /api/feeds の即時取得と定期取得で共有する純粋なパース (#106)。
-/// HTTP 取得・DB 書き込みは含まず、本文バイトから記事レコードの材料だけを取り出す。
-/// パース不能は Err として返し、呼び出し側がユーザーへの通知に使う。
-#[derive(Debug, PartialEq)]
-struct ParsedEntry {
-    url: String,
-    title: String,
-    content: Option<String>,
-    author: Option<String>,
-    /// RFC 3339。entry.published が無ければ entry.updated を使う。
-    published_at: Option<String>,
-}
-
-#[derive(Debug, PartialEq)]
-struct ParsedFeed {
-    title: Option<String>,
-    site_url: Option<String>,
-    entries: Vec<ParsedEntry>,
-}
-
-fn parse_feed_bytes(body: &[u8]) -> Result<ParsedFeed> {
-    let feed = parser::parse(body)?;
-    Ok(ParsedFeed {
-        title: feed.title.as_ref().map(|t| t.content.clone()),
-        site_url: feed.links.first().map(|l| l.href.clone()),
-        entries: feed
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                let entry_url = entry.links.first()?.href.clone();
-                let entry_title = entry
-                    .title
-                    .as_ref()
-                    .map(|t| t.content.clone())
-                    .unwrap_or_else(|| "(no title)".to_owned());
-                let content = entry
-                    .content
-                    .as_ref()
-                    .and_then(|c| c.body.clone())
-                    .or_else(|| entry.summary.as_ref().map(|s| s.content.clone()));
-                let author = entry.authors.first().map(|a| a.name.clone());
-                let published_at = entry
-                    .published
-                    .or(entry.updated)
-                    .map(|dt| dt.to_rfc3339());
-                Some(ParsedEntry {
-                    url: entry_url,
-                    title: entry_title,
-                    content,
-                    author,
-                    published_at,
-                })
-            })
-            .collect(),
-    })
-}
-
+/// POST /api/feeds の即時取得と定期取得で共有する純粋なパースは
+/// shared::feed::parse_feed_bytes に置く (#106)。
 #[cfg(test)]
 mod tests {
-    use super::parse_feed_bytes;
+    use home_rss_shared::feed::parse_feed_bytes;
 
     const RSS: &[u8] = br#"<?xml version="1.0"?>
 <rss version="2.0"><channel>

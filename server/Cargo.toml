@@ -9,8 +9,8 @@ crate-type = ["cdylib"]
 [dependencies]
 spin-sdk = { workspace = true }
 anyhow = { workspace = true }
+futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 home-rss-shared = { path = "../shared" }
 quick-xml = { workspace = true }
-feed-rs = { workspace = true }
