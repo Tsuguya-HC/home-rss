@@ -30,7 +30,16 @@ pub fn parse_feed_bytes(body: &[u8]) -> Result<ParsedFeed> {
             .entries
             .iter()
             .filter_map(|entry| {
-                let entry_url = entry.links.first()?.href.clone();
+                // #109: rel="alternate"（記事 URL）を rel="self"（フィード URL）より優先する。
+                // feed-rs は文書順を保持し、rel 省略時は "alternate" を補うため、
+                // alternate が無ければ従来通り先頭を使う。
+                let entry_url = entry
+                    .links
+                    .iter()
+                    .find(|l| l.rel.as_deref() == Some("alternate"))
+                    .or(entry.links.first())?
+                    .href
+                    .clone();
                 let entry_title = entry
                     .title
                     .as_ref()
@@ -112,6 +121,26 @@ mod tests {
         let feed = parse_feed_bytes(xml).unwrap();
         assert_eq!(feed.entries.len(), 1);
         assert_eq!(feed.entries[0].title, "(no title)");
+    }
+
+    #[test]
+    fn prefers_alternate_link_over_self_link() {
+        // #109: feeds that list a <link rel="self"> (feed URL) before the
+        // <link rel="alternate"> (article URL) must store the article URL,
+        // so the reader can link to the original page. feed-rs preserves
+        // document order, so taking links.first() stores the self URL.
+        let xml = br#"<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+<title>Example</title>
+<entry>
+<title>An article</title>
+<link rel="self" href="https://example.com/feed.xml"/>
+<link rel="alternate" href="https://example.com/article"/>
+</entry>
+</feed>"#;
+        let feed = parse_feed_bytes(xml).unwrap();
+        assert_eq!(feed.entries.len(), 1);
+        assert_eq!(feed.entries[0].url, "https://example.com/article");
     }
 
     #[test]
