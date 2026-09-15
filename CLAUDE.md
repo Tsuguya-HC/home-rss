@@ -6,15 +6,28 @@ Spin (WebAssembly) で構築するカスタム RSS リーダー。SpinKube 経�
 
 ```
                    ┌─ CronJob (15-30min) ─── fetcher (command trigger) ──┐
-                   │                                                      │
+                   │                                  │                   │
+                   │                            外部フィード (HTTPS)      │
+                   │                                  │                   │
 rss.infra.tgy.io → oauth2-proxy → server (http trigger) ─── API ────────├── shared-pg
                                    ui (http trigger) ─── 静的ファイル     │
                    └─ CronJob (daily) ──── cleaner (command trigger) ────┘
 ```
 
+**server と fetcher の両方が外部フィードを取りに行く。** フィード追加 (`POST /api/feeds`) は
+その場で 1 回取得し、以降は fetcher が定期取得する。取得+保存の実体は
+`shared/src/fetch.rs` の `fetch_and_store()` ひとつで、違いはタイムアウトの有無だけ
+（server は有界、fetcher は打ち切りなし）。**二重実装にしないこと** — 分かれていた頃は
+ETag / Last-Modified の扱いが既に乖離していた。
+
+ユーザーが指定した URL をサーバーが取りに行くので、`shared/src/ssrf.rs` の
+`reject_internal_feed_url()` が `fetch_and_store()` の入口で内部宛を弾く（追加時の 1 回だけでなく
+**定期取得のたびに効く**）。ネットワーク層の境界は
+[docs/network-access.md](docs/network-access.md) を参照。
+
 | サービス | trigger | 役割 | K8s リソース | OCI イメージ |
 |---------|---------|------|-------------|-------------|
-| server | http | REST API | SpinApp | `ghcr.io/tsuguya-hc/home-rss-server` |
+| server | http | REST API + フィード追加時の即時取得 | SpinApp | `ghcr.io/tsuguya-hc/home-rss-server` |
 | ui | http | Web UI (React SPA) + 静的ファイル (spin-fileserver) | SpinApp | `ghcr.io/tsuguya-hc/home-rss-ui` |
 | fetcher | command | フィード収集 → DB 書き込み | CronJob | `ghcr.io/tsuguya-hc/home-rss-fetcher` |
 | cleaner | command | 古い記事の削除 | CronJob | `ghcr.io/tsuguya-hc/home-rss-cleaner` |
@@ -27,8 +40,9 @@ home-rss/
 ├── ui/               # Web UI (React + Vite + TypeScript, pnpm)。ビルド成果物を spin-fileserver が配信
 ├── fetcher/          # フィード収集 (command trigger)
 ├── cleaner/          # 古い記事削除 (command trigger)
-├── shared/           # 共有ライブラリ (DB モデル、型定義)
+├── shared/           # 共有ライブラリ (DB モデル、型定義、取得+保存、SSRF ガード)
 ├── migrations/       # SQL マイグレーション
+├── docs/             # 運用メモ（network-access.md: CNP と外部アクセス）
 ├── Cargo.toml        # workspace
 └── .github/workflows/
     ├── ci.yml        # detect changes → leaf ジョブ → CI Gate
@@ -99,9 +113,14 @@ Issue はフェーズとリポジトリのラベルで分類:
 
 - **PUBLIC リポジトリ** — 機密値を絶対にコミットしない
 - Spin の cron trigger は SpinKube 非対応 → command trigger + K8s CronJob を使う
-- **フィード取得は HTTPS のみ**。`fetcher/spin.toml` の `allowed_outbound_hosts` に
-  `http://*:80` を戻しても、home-cluster の CNP が world:443 しか開けていないので
-  平文フィードは失敗ではなくハングする。開けるなら両方を揃えて直すこと
+- **フィード取得は HTTPS のみ**。`fetcher/spin.toml` / `server/spin.toml` の
+  `allowed_outbound_hosts` に `http://*:80` を戻しても、home-cluster の CNP が world:443 しか
+  開けていないので平文フィードは失敗ではなくハングする。開けるなら両方を揃えて直すこと。
+  外部アクセスの全体像と、新しい宛先が要るときの手順は [docs/network-access.md](docs/network-access.md)
+- **`shared` の `feed` feature** が feed パース（feed-rs / url）と `fetch_and_store` を囲う。
+  有効化するのは server / fetcher だけで、cleaner は引き込まない。ただし
+  `cargo test --workspace` は feature unification で全部に効くので、**単体ビルド
+  (`cargo build -p ...`) でしか差は出ない**（`shared/Cargo.toml` に実測メモ）
 - Spin SDK の PostgreSQL データ型サポートを事前に確認すること (UUID, TIMESTAMPTZ 等)
 
 ### spin-sdk 6.x への移行で踏んだところ
