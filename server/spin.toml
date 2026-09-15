@@ -14,7 +14,8 @@ component = "server"
 
 [component.server]
 source = "../target/wasm32-wasip1/release/home_rss_server.wasm"
-allowed_outbound_hosts = ["postgres://*:5432"]
+# 即時取得 (#106) でフィード取得のため HTTPS が要る。HTTPS only は fetcher と同じ。
+allowed_outbound_hosts = ["postgres://*:5432", "https://*:443"]
 [component.server.variables]
 db_url = "{{ db_url }}"
 db_ca_root = "{{ db_ca_root }}"

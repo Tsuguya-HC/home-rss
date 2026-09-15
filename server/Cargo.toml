@@ -13,3 +13,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 home-rss-shared = { path = "../shared" }
 quick-xml = { workspace = true }
+feed-rs = { workspace = true }

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use feed_rs::parser;
 use home_rss_shared::db;
 use home_rss_shared::http::{Resp, empty, json};
 use home_rss_shared::models::{Article, CreateFeedRequest, Feed};
@@ -46,6 +47,35 @@ fn json_ok(body: impl Into<String>) -> Result<Resp> {
 fn error_response(status: StatusCode, message: &str) -> Resp {
     let body = serde_json::to_string(message).unwrap_or_else(|_| "\"error\"".to_owned());
     json(status, format!(r#"{{"error":{body}}}"#))
+}
+
+/// POST /api/feeds の追加直後取得の結果 → HTTP 応答への写像 (#106)。
+/// 取得の失敗（到達不能・パース不能）は追加操作の結果としてユーザーに伝え、
+/// DB insert 後の成功パスのみ 201 を使う。
+#[derive(Debug, PartialEq)]
+enum ImmediateFetchOutcome {
+    /// その場で取得でき、記事が入った（通常の 201 応答）
+    Fetched,
+    /// 到達不能など、記事を取得できなかった（ユーザーに失敗として伝える）
+    FetchFailed,
+    /// 本文がフィードとしてパース不能（ユーザーに失敗として伝える）
+    Unparseable,
+}
+
+fn immediate_fetch_response(feed: &Feed, outcome: &ImmediateFetchOutcome) -> Resp {
+    let body = match serde_json::to_string(feed) {
+        Ok(b) => b,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "failed to serialize feed"),
+    };
+    match outcome {
+        ImmediateFetchOutcome::Fetched => json(StatusCode::CREATED, body),
+        ImmediateFetchOutcome::FetchFailed => {
+            error_response(StatusCode::BAD_GATEWAY, "failed to fetch feed")
+        }
+        ImmediateFetchOutcome::Unparseable => {
+            error_response(StatusCode::UNPROCESSABLE_ENTITY, "feed could not be parsed")
+        }
+    }
 }
 
 fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
@@ -131,13 +161,106 @@ async fn add_feed(req: Request) -> Result<Resp> {
     match rows.first() {
         Some(row) => {
             let feed = row_to_feed(row)?;
-            Ok(json(StatusCode::CREATED, serde_json::to_string(&feed)?))
+            let conn = db::connect().await?;
+            let outcome = immediate_fetch(&conn, &feed).await;
+            Ok(immediate_fetch_response(&feed, &outcome))
         }
         None => Ok(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to insert feed",
         )),
     }
+}
+
+/// フィード追加直後の即時取得 (#106)。`process_feed` 相当を server 側で実行し、
+/// 結果を呼び出し側がユーザーへ通知できる形で返す。失敗しても追加自体は残す。
+async fn immediate_fetch(
+    conn: &spin_sdk::pg::Connection,
+    feed: &Feed,
+) -> ImmediateFetchOutcome {
+    use spin_sdk::http::{EmptyBody, Request, Response, send};
+
+    let req = match Request::get(&feed.url)
+        .header("user-agent", "home-rss-fetcher/0.1")
+        .body(EmptyBody::new())
+    {
+        Ok(r) => r,
+        Err(_) => return ImmediateFetchOutcome::FetchFailed,
+    };
+    let resp: Response = match send(req).await {
+        Ok(r) => r,
+        Err(_) => return ImmediateFetchOutcome::FetchFailed,
+    };
+    if resp.status() != StatusCode::OK {
+        return ImmediateFetchOutcome::FetchFailed;
+    }
+    let body = match resp.into_body().bytes().await {
+        Ok(b) => b,
+        Err(_) => return ImmediateFetchOutcome::FetchFailed,
+    };
+    let parsed = match parser::parse(body.as_ref()) {
+        Ok(f) => f,
+        Err(_) => return ImmediateFetchOutcome::Unparseable,
+    };
+
+    let feed_title = parsed.title.as_ref().map(|t| t.content.clone());
+    let site_url = parsed.links.first().map(|l| l.href.clone());
+
+    for entry in &parsed.entries {
+        let entry_url = match entry.links.first() {
+            Some(l) => l.href.clone(),
+            None => continue,
+        };
+        let entry_title = entry
+            .title
+            .as_ref()
+            .map(|t| t.content.clone())
+            .unwrap_or_else(|| "(no title)".to_owned());
+        let content = entry
+            .content
+            .as_ref()
+            .and_then(|c| c.body.clone())
+            .or_else(|| entry.summary.as_ref().map(|s| s.content.clone()));
+        let author = entry.authors.first().map(|a| a.name.clone());
+        let published_at: Option<String> =
+            entry.published.or(entry.updated).map(|dt| dt.to_rfc3339());
+
+        if conn
+            .execute(
+                "INSERT INTO articles (feed_id, url, title, content, author, published_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz) ON CONFLICT DO NOTHING",
+                vec![
+                    ParameterValue::Uuid(feed.id.clone()),
+                    entry_url.into(),
+                    entry_title.into(),
+                    content.into(),
+                    author.into(),
+                    published_at.into(),
+                ],
+            )
+            .await
+            .is_err()
+        {
+            return ImmediateFetchOutcome::FetchFailed;
+        }
+    }
+
+    if conn
+        .execute(
+            "UPDATE feeds SET title = $1, site_url = $2, last_fetched_at = NOW() WHERE id = $3",
+            vec![
+                feed_title.into(),
+                site_url.into(),
+                ParameterValue::Uuid(feed.id.clone()),
+            ],
+        )
+        .await
+        .is_err()
+    {
+        return ImmediateFetchOutcome::FetchFailed;
+    }
+
+    ImmediateFetchOutcome::Fetched
 }
 
 async fn delete_feed(id: &str) -> Result<Resp> {
@@ -365,5 +488,42 @@ mod tests {
     fn errors_on_malformed_xml() {
         let xml = br#"<opml><body><outline xmlUrl="http://a.example/feed"></body></opml>"#;
         assert!(parse_opml(xml).is_err());
+    }
+
+    fn test_feed() -> home_rss_shared::models::Feed {
+        home_rss_shared::models::Feed {
+            id: "00000000-0000-0000-0000-000000000000".to_owned(),
+            url: "https://example.com/feed".to_owned(),
+            title: None,
+            site_url: None,
+            etag: None,
+            last_modified: None,
+            last_fetched_at: None,
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn fetched_feed_returns_created() {
+        use super::{ImmediateFetchOutcome, immediate_fetch_response};
+        let feed = test_feed();
+        let resp = immediate_fetch_response(&feed, &ImmediateFetchOutcome::Fetched);
+        assert_eq!(resp.status(), spin_sdk::http::StatusCode::CREATED);
+    }
+
+    #[test]
+    fn fetch_failure_is_surfaced_not_created() {
+        use super::{ImmediateFetchOutcome, immediate_fetch_response};
+        let feed = test_feed();
+        let resp = immediate_fetch_response(&feed, &ImmediateFetchOutcome::FetchFailed);
+        assert_ne!(resp.status(), spin_sdk::http::StatusCode::CREATED);
+    }
+
+    #[test]
+    fn unparseable_feed_is_surfaced_not_created() {
+        use super::{ImmediateFetchOutcome, immediate_fetch_response};
+        let feed = test_feed();
+        let resp = immediate_fetch_response(&feed, &ImmediateFetchOutcome::Unparseable);
+        assert_ne!(resp.status(), spin_sdk::http::StatusCode::CREATED);
     }
 }
