@@ -6,7 +6,29 @@ edition = "2024"
 [dependencies]
 spin-sdk = { workspace = true }
 anyhow = { workspace = true }
+futures-util = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
-feed-rs = { workspace = true }
+feed-rs = { workspace = true, optional = true }
+# feed-rs が既に依存グラフに引き込んでいるバージョンに合わせる。SSRF ガード
+# (reject_internal_feed_url) の URL パースに使う (#106 R5)。
+url = { workspace = true, optional = true }
+
+[features]
+# feed パース (feed-rs/url) と、それを使う取得+保存の共有処理 (fetch)。
+# fetcher/server だけが有効化する (#106 G)。
+#
+# 効く範囲と効かない範囲（両方とも実測済み、#106 R16）:
+# - 効く: `_build-rust.yml` が matrix でサービスごとに `cargo build -p
+#   home-rss-<service>` を独立ジョブとして立てる、リリース/検証ビルドの経路。
+#   `cargo build -p home-rss-cleaner --target wasm32-wasip1` は feed-rs を
+#   一切 compile しない（cleaner 単体のビルド時間で約21%改善、general 実測）
+# - 効かない: `_test.yml` の `cargo test --workspace`。feature unification
+#   のため、server/fetcher が要求する `feed` が cleaner の同じビルドグラフに
+#   渡ってしまい、feed-rs が compile されて cleaner のテストバイナリにも
+#   リンクされる（resolver = "2" でも解消されない既知の挙動、実測済み）。
+#   `_test.yml` を per-service に割る対処は取らない — workspace 全体の整合性
+#   を見るテスト（今回の `feed`-gated テストのように `--workspace` でしか
+#   走らない組み合わせ）が分断されるため、費用よりそちらを優先する
+feed = ["dep:feed-rs", "dep:futures-util", "dep:url"]

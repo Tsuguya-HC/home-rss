@@ -1,11 +1,10 @@
 use anyhow::Result;
 use home_rss_shared::db;
-use home_rss_shared::feed::parse_feed_bytes;
+use home_rss_shared::fetch::{FetchAndStoreOutcome, fetch_and_store};
 use home_rss_shared::http::{Resp, text};
-use spin_sdk::http::body::IncomingBodyExt;
-use spin_sdk::http::{EmptyBody, Request, Response, StatusCode, send};
+use spin_sdk::http::{Request, StatusCode};
 use spin_sdk::http_service;
-use spin_sdk::pg::{Connection, Decode, ParameterValue};
+use spin_sdk::pg::{Connection, Decode};
 
 #[http_service]
 async fn handle_fetch(_req: Request) -> Resp {
@@ -45,6 +44,9 @@ async fn fetch_all_feeds() -> Result<()> {
     Ok(())
 }
 
+/// POST /api/feeds の即時取得と定期取得で共有する「取得して保存する」処理は
+/// home_rss_shared::fetch::fetch_and_store に置く (#106)。timeout に None を渡し、
+/// 既存の定期取得の振る舞い（打ち切りなし）をそのまま保つ。
 async fn process_feed(
     conn: &Connection,
     feed_id: &str,
@@ -52,124 +54,10 @@ async fn process_feed(
     etag: Option<&str>,
     last_modified: Option<&str>,
 ) -> Result<()> {
-    let mut builder = Request::get(url).header("user-agent", "home-rss-fetcher/0.1");
-    if let Some(etag) = etag {
-        builder = builder.header("if-none-match", etag);
-    }
-    if let Some(lm) = last_modified {
-        builder = builder.header("if-modified-since", lm);
-    }
-    let req = builder.body(EmptyBody::new())?;
-
-    let resp: Response = send(req).await?;
-
-    if resp.status() == StatusCode::NOT_MODIFIED {
-        return Ok(());
-    }
-    if resp.status() != StatusCode::OK {
-        anyhow::bail!("HTTP {} fetching {url}", resp.status());
-    }
-
-    let new_etag = header_string(&resp, "etag");
-    let new_last_modified = header_string(&resp, "last-modified");
-
-    let body = resp.into_body().bytes().await?;
-    let parsed = parse_feed_bytes(body.as_ref())?;
-
-    for entry in &parsed.entries {
-        conn.execute(
-            "INSERT INTO articles (feed_id, url, title, content, author, published_at) \
-             VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz) ON CONFLICT DO NOTHING",
-            vec![
-                ParameterValue::Uuid(feed_id.to_owned()),
-                entry.url.clone().into(),
-                entry.title.clone().into(),
-                entry.content.clone().into(),
-                entry.author.clone().into(),
-                entry.published_at.clone().into(),
-            ],
-        )
-        .await?;
-    }
-
-    conn.execute(
-        "UPDATE feeds SET title = $1, site_url = $2, etag = $3, last_modified = $4, \
-         last_fetched_at = NOW() WHERE id = $5",
-        vec![
-            parsed.title.into(),
-            parsed.site_url.into(),
-            new_etag.into(),
-            new_last_modified.into(),
-            ParameterValue::Uuid(feed_id.to_owned()),
-        ],
-    )
-    .await?;
-
-    Ok(())
-}
-
-fn header_string(resp: &Response, name: &str) -> Option<String> {
-    resp.headers()
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned)
-}
-
-/// POST /api/feeds の即時取得と定期取得で共有する純粋なパースは
-/// shared::feed::parse_feed_bytes に置く (#106)。
-#[cfg(test)]
-mod tests {
-    use home_rss_shared::feed::parse_feed_bytes;
-
-    const RSS: &[u8] = br#"<?xml version="1.0"?>
-<rss version="2.0"><channel>
-<title>Example Feed</title>
-<link>https://example.com/</link>
-<item>
-<title>Hello</title>
-<link>https://example.com/hello</link>
-<description>world</description>
-<pubDate>Mon, 15 Sep 2026 00:00:00 GMT</pubDate>
-</item>
-</channel></rss>"#;
-
-    #[test]
-    fn parses_feed_title_site_url_and_entry() {
-        let feed = parse_feed_bytes(RSS).unwrap();
-        assert_eq!(feed.title.as_deref(), Some("Example Feed"));
-        assert_eq!(feed.site_url.as_deref(), Some("https://example.com/"));
-        assert_eq!(feed.entries.len(), 1);
-        assert_eq!(feed.entries[0].url, "https://example.com/hello");
-        assert_eq!(feed.entries[0].title, "Hello");
-    }
-
-    #[test]
-    fn entry_without_link_is_skipped() {
-        let xml = br#"<?xml version="1.0"?>
-<rss version="2.0"><channel>
-<title>T</title>
-<item><title>No link</title></item>
-<item><title>Has link</title><link>https://example.com/x</link></item>
-</channel></rss>"#;
-        let feed = parse_feed_bytes(xml).unwrap();
-        assert_eq!(feed.entries.len(), 1);
-        assert_eq!(feed.entries[0].url, "https://example.com/x");
-    }
-
-    #[test]
-    fn entry_without_title_gets_default() {
-        let xml = br#"<?xml version="1.0"?>
-<rss version="2.0"><channel>
-<title>T</title>
-<item><link>https://example.com/x</link></item>
-</channel></rss>"#;
-        let feed = parse_feed_bytes(xml).unwrap();
-        assert_eq!(feed.entries.len(), 1);
-        assert_eq!(feed.entries[0].title, "(no title)");
-    }
-
-    #[test]
-    fn unparseable_body_is_an_error() {
-        assert!(parse_feed_bytes(b"this is not a feed").is_err());
+    match fetch_and_store(conn, feed_id, url, etag, last_modified, None).await {
+        FetchAndStoreOutcome::NotModified | FetchAndStoreOutcome::Stored(_) => Ok(()),
+        FetchAndStoreOutcome::FetchFailed(e)
+        | FetchAndStoreOutcome::Unparseable(e)
+        | FetchAndStoreOutcome::StoreFailed(e) => Err(e),
     }
 }

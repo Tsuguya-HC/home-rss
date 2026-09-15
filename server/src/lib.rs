@@ -1,8 +1,9 @@
 use anyhow::Result;
 use home_rss_shared::db;
-use home_rss_shared::feed::parse_feed_bytes;
+use home_rss_shared::fetch::{FetchAndStoreOutcome, decode_feed_row, fetch_and_store};
 use home_rss_shared::http::{Resp, empty, json};
 use home_rss_shared::models::{Article, CreateFeedRequest, Feed};
+use home_rss_shared::ssrf::reject_internal_feed_url;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use spin_sdk::http::body::IncomingBodyExt;
@@ -50,17 +51,23 @@ fn error_response(status: StatusCode, message: &str) -> Resp {
 }
 
 /// POST /api/feeds の追加直後取得の結果 → HTTP 応答への写像 (#106)。
-/// 取得の失敗（到達不能・パース不能）は追加操作の結果としてユーザーに伝え、
-/// DB insert 後の成功パスのみ 201 を使う。
+/// 取得の失敗（到達不能・パース不能）はフィード取得自体の失敗としてユーザーに伝え、
+/// DB 書き込みの失敗はサーバ側の障害として区別して伝える。成功パスのみ 201 を使う。
 #[derive(Debug)]
 enum ImmediateFetchOutcome {
     /// その場で取得でき、記事が入った（通常の 201 応答）。
-    /// 応答に含めるのは取得後の最新行（RETURNING の結果）。
+    /// 応答に含めるのは取得後の最新行（RETURNING の結果）。ただし
+    /// FetchAndStoreOutcome::NotModified（追加直後は etag が無いため実際には
+    /// 起こらないはずの防御的な分岐、#106 R10）の場合だけ、取得前の行が
+    /// そのまま使われる。
     Fetched(Feed),
     /// 到達不能など、記事を取得できなかった（ユーザーに失敗として伝える）
     FetchFailed,
     /// 本文がフィードとしてパース不能（ユーザーに失敗として伝える）
     Unparseable,
+    /// 取得には成功したが、DB への保存に失敗した。フィード取得自体は正常なので
+    /// 502 ではなくサーバ側のエラーとして伝える。
+    StoreFailed,
 }
 
 fn immediate_fetch_response(outcome: &ImmediateFetchOutcome) -> Resp {
@@ -78,6 +85,10 @@ fn immediate_fetch_response(outcome: &ImmediateFetchOutcome) -> Resp {
         ImmediateFetchOutcome::Unparseable => {
             error_response(StatusCode::UNPROCESSABLE_ENTITY, "feed could not be parsed")
         }
+        ImmediateFetchOutcome::StoreFailed => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "feed was fetched but failed to save",
+        ),
     }
 }
 
@@ -104,16 +115,7 @@ const ARTICLE_SELECT: &str = "SELECT a.id::text, a.feed_id::text, a.url, a.title
      FROM articles a";
 
 fn row_to_feed(row: &Row) -> Result<Feed> {
-    Ok(Feed {
-        id: String::decode(&row[0])?,
-        url: String::decode(&row[1])?,
-        title: Option::<String>::decode(&row[2])?,
-        site_url: Option::<String>::decode(&row[3])?,
-        etag: Option::<String>::decode(&row[4])?,
-        last_modified: Option::<String>::decode(&row[5])?,
-        last_fetched_at: Option::<i64>::decode(&row[6])?,
-        created_at: Option::<i64>::decode(&row[7])?,
-    })
+    decode_feed_row(row)
 }
 
 fn row_to_article(row: &Row) -> Result<Article> {
@@ -147,6 +149,16 @@ async fn add_feed(req: Request) -> Result<Resp> {
         Err(_) => return Ok(error_response(StatusCode::BAD_REQUEST, "invalid JSON body")),
     };
 
+    // 検証済みの正規化後 URL を保存する (#106 U7): 検証層 (Url::parse) と
+    // 保存・fetch する側が違う文字列を見ていると、先頭空白・末尾改行等が
+    // ガードを素通りしたまま feeds 行を作ってしまい、以後 fetch_and_store が
+    // 永遠に失敗し続ける。大文字スキーム/ホストの正規化も兼ねるので、
+    // UNIQUE(url) が素のテキスト比較でも大小違いによる二重登録を防げる。
+    let url = match reject_internal_feed_url(&create_req.url) {
+        Ok(u) => u,
+        Err(msg) => return Ok(error_response(StatusCode::BAD_REQUEST, msg)),
+    };
+
     let conn = db::connect().await?;
     let rows = conn
         .query(
@@ -155,7 +167,7 @@ async fn add_feed(req: Request) -> Result<Resp> {
              RETURNING id::text, url, title, site_url, etag, last_modified, \
              EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
              EXTRACT(EPOCH FROM created_at)::bigint",
-            vec![ParameterValue::Str(create_req.url)],
+            vec![ParameterValue::Str(url.to_string())],
         )
         .await?
         .collect()
@@ -164,7 +176,6 @@ async fn add_feed(req: Request) -> Result<Resp> {
     match rows.first() {
         Some(row) => {
             let feed = row_to_feed(row)?;
-            let conn = db::connect().await?;
             let outcome = immediate_fetch(&conn, &feed).await;
             Ok(immediate_fetch_response(&outcome))
         }
@@ -175,150 +186,38 @@ async fn add_feed(req: Request) -> Result<Resp> {
     }
 }
 
-/// フィード追加直後の即時取得 (#106)。`process_feed` 相当を server 側で実行し、
-/// 結果を呼び出し側がユーザーへ通知できる形で返す。失敗しても追加自体は残す。
+/// ハング対策 (#106): 応答を返さないホストへの send はタイムアウト無しに待ち続ける。
+/// WASI の outbound HTTP にタイムアウト API が無いため、一定時間で打ち切る。
+///
+/// `ui/src/api.ts` の `ADD_FEED_TIMEOUT_MS`（= `UI_ADD_FEED_TIMEOUT_SECS`）は、
+/// この値の**2倍**（send + body の各段階）に `UI_TIMEOUT_MARGIN_SECS` の
+/// 余裕を足した値を前提にしている (#106 R8/U9、
+/// `fetch_timeout_is_positive_and_matches_ui_expectation` で検査)。
+/// ここを変えたら `ADD_FEED_TIMEOUT_MS` とそのコメントも見直すこと。
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// フィード追加直後の即時取得 (#106)。取得〜保存の実処理は
+/// home_rss_shared::fetch::fetch_and_store に一本化されており、定期取得
+/// (fetcher) と同じコードを通る。失敗しても追加自体は残す。
 async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> ImmediateFetchOutcome {
-    use spin_sdk::http::{EmptyBody, Request, Response, send};
-
-    // ハング対策 (#106): 応答を返さないホストへの send はタイムアウト無しに待ち続ける。
-    // WASI の outbound HTTP にタイムアウト API が無いため、一定時間で打ち切って
-    // FetchFailed として返す。
-    const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-
-    async fn with_timeout<T>(
-        duration: std::time::Duration,
-        fut: impl std::future::Future<Output = T>,
-    ) -> Option<T> {
-        use futures_util::FutureExt;
-        futures_util::select! {
-            result = fut.fuse() => Some(result),
-            _ = spin_sdk::time::sleep(duration).fuse() => None,
-        }
-    }
-
-    let req = match Request::get(&feed.url)
-        .header("user-agent", "home-rss-fetcher/0.1")
-        .body(EmptyBody::new())
-    {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!(
-                "immediate_fetch {}: failed to build request: {e:#}",
-                feed.url
-            );
-            return ImmediateFetchOutcome::FetchFailed;
-        }
-    };
-    let resp: Response = match with_timeout(FETCH_TIMEOUT, send(req)).await {
-        Some(Ok(r)) => r,
-        Some(Err(e)) => {
-            eprintln!("immediate_fetch {}: request failed: {e:#}", feed.url);
-            return ImmediateFetchOutcome::FetchFailed;
-        }
-        None => {
-            eprintln!("immediate_fetch {}: request timed out", feed.url);
-            return ImmediateFetchOutcome::FetchFailed;
-        }
-    };
-    if resp.status() != StatusCode::OK {
-        eprintln!(
-            "immediate_fetch {}: unexpected HTTP status {}",
-            feed.url,
-            resp.status()
-        );
-        return ImmediateFetchOutcome::FetchFailed;
-    }
-    let body = match with_timeout(FETCH_TIMEOUT, resp.into_body().bytes()).await {
-        Some(Ok(b)) => b,
-        Some(Err(e)) => {
-            eprintln!("immediate_fetch {}: failed to read body: {e:#}", feed.url);
-            return ImmediateFetchOutcome::FetchFailed;
-        }
-        None => {
-            eprintln!("immediate_fetch {}: timed out reading body", feed.url);
-            return ImmediateFetchOutcome::FetchFailed;
-        }
-    };
-    let parsed = match parse_feed_bytes(body.as_ref()) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("immediate_fetch {}: unparseable feed: {e:#}", feed.url);
-            return ImmediateFetchOutcome::Unparseable;
-        }
-    };
-
-    let feed_title = parsed.title.clone();
-    let site_url = parsed.site_url.clone();
-
-    for entry in &parsed.entries {
-        if let Err(e) = conn
-            .execute(
-                "INSERT INTO articles (feed_id, url, title, content, author, published_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz) ON CONFLICT DO NOTHING",
-                vec![
-                    ParameterValue::Uuid(feed.id.clone()),
-                    entry.url.clone().into(),
-                    entry.title.clone().into(),
-                    entry.content.clone().into(),
-                    entry.author.clone().into(),
-                    entry.published_at.clone().into(),
-                ],
-            )
-            .await
-        {
-            eprintln!(
-                "immediate_fetch {}: failed to insert article: {e:#}",
-                feed.url
-            );
-            return ImmediateFetchOutcome::FetchFailed;
-        }
-    }
-
-    match conn
-        .query(
-            "UPDATE feeds SET title = $1, site_url = $2, last_fetched_at = NOW() WHERE id = $3 \
-             RETURNING id::text, url, title, site_url, etag, last_modified, \
-             EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
-            vec![
-                feed_title.into(),
-                site_url.into(),
-                ParameterValue::Uuid(feed.id.clone()),
-            ],
-        )
-        .await
-    {
-        Ok(rows) => match rows.collect().await {
-            Ok(rows) => match rows.first() {
-                Some(row) => match row_to_feed(row) {
-                    Ok(updated) => ImmediateFetchOutcome::Fetched(updated),
-                    Err(e) => {
-                        eprintln!(
-                            "immediate_fetch {}: failed to decode updated feed: {e:#}",
-                            feed.url
-                        );
-                        ImmediateFetchOutcome::FetchFailed
-                    }
-                },
-                None => {
-                    eprintln!(
-                        "immediate_fetch {}: UPDATE RETURNING returned no rows",
-                        feed.url
-                    );
-                    ImmediateFetchOutcome::FetchFailed
-                }
-            },
-            Err(e) => {
-                eprintln!(
-                    "immediate_fetch {}: failed to collect updated feed: {e:#}",
-                    feed.url
-                );
-                ImmediateFetchOutcome::FetchFailed
-            }
-        },
-        Err(e) => {
-            eprintln!("immediate_fetch {}: failed to update feed: {e:#}", feed.url);
+    match fetch_and_store(conn, &feed.id, &feed.url, None, None, Some(FETCH_TIMEOUT)).await {
+        FetchAndStoreOutcome::Stored(updated) => ImmediateFetchOutcome::Fetched(updated),
+        // 追加直後は etag/last_modified が無いので 304 は起こらないはずだが、
+        // 万一起きた場合は変更無し = 直前に取得済み（＝挿入直後）の行をそのまま
+        // 返す。Fetched のコメントの通り、この経路だけは「取得後」ではなく
+        // 「取得前」の行になる (#106 R10)。
+        FetchAndStoreOutcome::NotModified => ImmediateFetchOutcome::Fetched(feed.clone()),
+        FetchAndStoreOutcome::FetchFailed(e) => {
+            eprintln!("immediate_fetch {}: {e:#}", feed.url);
             ImmediateFetchOutcome::FetchFailed
+        }
+        FetchAndStoreOutcome::Unparseable(e) => {
+            eprintln!("immediate_fetch {}: {e:#}", feed.url);
+            ImmediateFetchOutcome::Unparseable
+        }
+        FetchAndStoreOutcome::StoreFailed(e) => {
+            eprintln!("immediate_fetch {}: {e:#}", feed.url);
+            ImmediateFetchOutcome::StoreFailed
         }
     }
 }
@@ -414,7 +313,7 @@ async fn mark_all_read() -> Result<Resp> {
 
 async fn import_opml(req: Request) -> Result<Resp> {
     let body = req.into_body().bytes().await?;
-    let urls = parse_opml(body.as_ref())?;
+    let (urls, skipped_invalid) = parse_opml(body.as_ref())?;
 
     if urls.is_empty() {
         return Ok(error_response(
@@ -425,22 +324,52 @@ async fn import_opml(req: Request) -> Result<Resp> {
 
     let conn = db::connect().await?;
     let mut imported = 0u64;
+    let mut already_present = 0u64;
+    let mut skipped_blocked = 0u64;
     for url in &urls {
-        imported += conn
+        // OPML は任意のホストを持ち込める入力なので、DB に入れる前に add_feed
+        // と同じ SSRF ガードを通す (#106 R2)。理由（壊れた OPML エントリか、
+        // 内部ホスト宛で拒否されたか）を区別して返す (#106 U2)。保存するのは
+        // 正規化後の URL（#106 U7、add_feed と同じ理由）。
+        let normalized = match reject_internal_feed_url(url) {
+            Ok(u) => u,
+            Err(_) => {
+                skipped_blocked += 1;
+                continue;
+            }
+        };
+        // affected row 数は ON CONFLICT DO NOTHING で 0 のことがある（既存の
+        // feed と同じ URL）。0 も imported/skipped のどちらにも数えないと
+        // 合計が入力件数と一致しなくなる (#106 U8)。
+        let affected = conn
             .execute(
                 "INSERT INTO feeds (url) VALUES ($1) ON CONFLICT (url) DO NOTHING",
-                vec![ParameterValue::Str(url.clone())],
+                vec![ParameterValue::Str(normalized.to_string())],
             )
             .await?;
+        if affected > 0 {
+            imported += 1;
+        } else {
+            already_present += 1;
+        }
     }
 
-    json_ok(format!(r#"{{"imported":{imported}}}"#))
+    // imported + already_present + skipped_blocked + skipped_invalid ==
+    // OPML 内の xmlUrl 属性の総数、になるようにする (#106 U8)。
+    json_ok(format!(
+        r#"{{"imported":{imported},"already_present":{already_present},"skipped_invalid":{skipped_invalid},"skipped_blocked":{skipped_blocked}}}"#
+    ))
 }
 
-fn parse_opml(data: &[u8]) -> Result<Vec<String>> {
+/// OPML から xmlUrl を抜き出す。戻り値は (有効な URL 一覧, xmlUrl 属性はあった
+/// がその場で使えなかった件数)。後者は空/空白のみ/エンコーディング破損
+/// (`\u{FFFD}`) の場合で、xmlUrl 属性自体が無い outline（フォルダ等の
+/// 構造要素）はカウントしない (#106 U2)。
+fn parse_opml(data: &[u8]) -> Result<(Vec<String>, u64)> {
     let text = String::from_utf8_lossy(data);
     let mut reader = Reader::from_str(&text);
     let mut urls = Vec::new();
+    let mut skipped_invalid = 0u64;
 
     loop {
         match reader.read_event() {
@@ -451,6 +380,8 @@ fn parse_opml(data: &[u8]) -> Result<Vec<String>> {
                             let url = attr.value.trim().to_string();
                             if !url.is_empty() && !url.contains('\u{FFFD}') {
                                 urls.push(url);
+                            } else {
+                                skipped_invalid += 1;
                             }
                         }
                     }
@@ -462,7 +393,7 @@ fn parse_opml(data: &[u8]) -> Result<Vec<String>> {
         }
     }
 
-    Ok(urls)
+    Ok((urls, skipped_invalid))
 }
 
 async fn get_stats() -> Result<Resp> {
@@ -499,8 +430,9 @@ mod tests {
                 <outline text="B" xmlUrl="http://b.example/feed"></outline>
             </outline>
         </body></opml>"#;
-        let urls = parse_opml(xml).unwrap();
+        let (urls, skipped_invalid) = parse_opml(xml).unwrap();
         assert_eq!(urls, vec!["http://a.example/feed", "http://b.example/feed"]);
+        assert_eq!(skipped_invalid, 0);
     }
 
     #[test]
@@ -511,8 +443,11 @@ mod tests {
             <outline text="whitespace" xmlUrl="   " />
             <outline text="ok" xmlUrl="http://ok.example/feed" />
         </body></opml>"#;
-        let urls = parse_opml(xml).unwrap();
+        let (urls, skipped_invalid) = parse_opml(xml).unwrap();
         assert_eq!(urls, vec!["http://ok.example/feed"]);
+        // "no url" は xmlUrl 属性自体が無いのでカウントしない。
+        // "empty" と "whitespace" はカウントする。
+        assert_eq!(skipped_invalid, 2);
     }
 
     #[test]
@@ -524,11 +459,12 @@ mod tests {
         xml.extend_from_slice(
             br#"<outline text="ok" xmlUrl="http://ok.example/feed" /></body></opml>"#,
         );
-        let urls = parse_opml(&xml).unwrap();
+        let (urls, skipped_invalid) = parse_opml(&xml).unwrap();
         assert_eq!(
             urls,
             vec!["http://broken-text.example/feed", "http://ok.example/feed"]
         );
+        assert_eq!(skipped_invalid, 0);
     }
 
     #[test]
@@ -540,8 +476,9 @@ mod tests {
         xml.extend_from_slice(
             br#"<outline text="ok" xmlUrl="http://ok.example/feed" /></body></opml>"#,
         );
-        let urls = parse_opml(&xml).unwrap();
+        let (urls, skipped_invalid) = parse_opml(&xml).unwrap();
         assert_eq!(urls, vec!["http://ok.example/feed"]);
+        assert_eq!(skipped_invalid, 1);
     }
 
     #[test]
@@ -583,7 +520,9 @@ mod tests {
             .into_inner()
             .expect("immediate_fetch_response body");
         let feed: home_rss_shared::models::Feed = serde_json::from_slice(body.as_ref()).unwrap();
-        // Fetched が運ぶのは取得後の最新行。更新前の None のまま返してはならない。
+        // Stored 由来の Fetched が運ぶのは取得後の最新行。更新前の None のまま
+        // 返してはならない（NotModified 由来の Fetched だけが例外で取得前の
+        // 行を運ぶ。#106 U5/U10、ImmediateFetchOutcome::Fetched の doc 参照）。
         assert_eq!(feed.title.as_deref(), Some("Example Feed"));
         assert_eq!(feed.site_url.as_deref(), Some("https://example.com/"));
         assert_eq!(feed.last_fetched_at, Some(1_757_894_400));
@@ -601,5 +540,34 @@ mod tests {
         use super::{ImmediateFetchOutcome, immediate_fetch_response};
         let resp = immediate_fetch_response(&ImmediateFetchOutcome::Unparseable);
         assert_ne!(resp.status(), spin_sdk::http::StatusCode::CREATED);
+    }
+
+    #[test]
+    fn store_failure_is_surfaced_as_server_error_not_bad_gateway() {
+        use super::{ImmediateFetchOutcome, immediate_fetch_response};
+        // 取得自体は成功しているので、上流障害を示す 502 ではなく
+        // サーバ側の失敗を示す 500 で返す (#106 B)。
+        let resp = immediate_fetch_response(&ImmediateFetchOutcome::StoreFailed);
+        assert_eq!(
+            resp.status(),
+            spin_sdk::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_ne!(resp.status(), spin_sdk::http::StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn fetch_timeout_is_positive_and_matches_ui_expectation() {
+        // ui/src/api.ts の ADD_FEED_TIMEOUT_MS (= UI_ADD_FEED_TIMEOUT_SECS) は
+        // この値の2倍 (send/body 各段階) + UI_TIMEOUT_MARGIN_SECS の余裕を
+        // 前提にしている。0秒化や余裕の食いつぶしのような劣化を検出する
+        // sanity テスト (#106 R8/U9)。上限を緩くしすぎると「2倍+余裕」を
+        // 守れないまま緑になる（例: 22秒でも旧テストは通った）。
+        const UI_ADD_FEED_TIMEOUT_SECS: u64 = 45;
+        const UI_TIMEOUT_MARGIN_SECS: u64 = 10;
+
+        assert!(super::FETCH_TIMEOUT.as_secs() > 0);
+        assert!(
+            super::FETCH_TIMEOUT.as_secs() * 2 + UI_TIMEOUT_MARGIN_SECS <= UI_ADD_FEED_TIMEOUT_SECS
+        );
     }
 }

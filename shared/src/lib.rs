@@ -1,4 +1,9 @@
 pub mod db;
+#[cfg(feature = "feed")]
 pub mod feed;
+#[cfg(feature = "feed")]
+pub mod fetch;
 pub mod http;
 pub mod models;
+#[cfg(feature = "feed")]
+pub mod ssrf;

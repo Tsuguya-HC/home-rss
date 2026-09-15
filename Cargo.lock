@@ -404,7 +404,6 @@ name = "home-rss-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "futures-util",
  "home-rss-shared",
  "quick-xml 0.42.0",
  "serde",
@@ -419,9 +418,11 @@ dependencies = [
  "anyhow",
  "bytes",
  "feed-rs",
+ "futures-util",
  "serde",
  "serde_json",
  "spin-sdk",
+ "url",
 ]
 
 [[package]]

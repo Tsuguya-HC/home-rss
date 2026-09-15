@@ -82,6 +82,11 @@ mod tests {
         assert_eq!(feed.entries.len(), 1);
         assert_eq!(feed.entries[0].url, "https://example.com/hello");
         assert_eq!(feed.entries[0].title, "Hello");
+        assert_eq!(feed.entries[0].content.as_deref(), Some("world"));
+        assert_eq!(
+            feed.entries[0].published_at.as_deref(),
+            Some("2026-09-15T00:00:00+00:00")
+        );
     }
 
     #[test]

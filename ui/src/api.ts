@@ -1,5 +1,13 @@
 import { Feed, Article, Stats } from './types'
 
+// server/src/lib.rs の UI_ADD_FEED_TIMEOUT_SECS / UI_TIMEOUT_MARGIN_SECS と
+// 対になっている (#106 R8/U9)。サーバ側は
+// `fetch_timeout_is_positive_and_matches_ui_expectation` テストで
+// `FETCH_TIMEOUT.as_secs() * 2 + UI_TIMEOUT_MARGIN_SECS <=
+// UI_ADD_FEED_TIMEOUT_SECS` を検査している。どちらかを変えたら両方見直すこと。
+const UI_ADD_FEED_TIMEOUT_SECS = 45
+const ADD_FEED_TIMEOUT_MS = UI_ADD_FEED_TIMEOUT_SECS * 1_000
+
 async function request<T>(url: string, init?: RequestInit, timeoutMs = 30_000): Promise<T> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -16,7 +24,12 @@ async function request<T>(url: string, init?: RequestInit, timeoutMs = 30_000): 
       throw new Error(message)
     }
     if (res.status === 204) return undefined as T
-    return res.json()
+    return await res.json()
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new Error('request timed out')
+    }
+    throw e
   } finally {
     clearTimeout(timer)
   }
@@ -33,8 +46,7 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
       },
-      // サーバ側の即時取得は最大30秒（send 15s＋body 15s）かかるため余裕を持たせる
-      45_000,
+      ADD_FEED_TIMEOUT_MS,
     ),
 
   deleteFeed: (id: string) =>
@@ -55,7 +67,17 @@ export const api = {
     request<void>('/api/articles/read-all', { method: 'POST' }),
 
   importOpml: (file: File) =>
-    request<{ imported: number }>('/api/import/opml', {
+    // imported + already_present + skipped_invalid + skipped_blocked ==
+    // OPML 内の xmlUrl 属性の総数 (#106 U8)。already_present: 既存の feed と
+    // 同じ URL（ON CONFLICT DO NOTHING で 0 行）。skipped_invalid: xmlUrl が
+    // 空/不正だった件数。skipped_blocked: SSRF ガードで拒否された件数 (#106
+    // U2)。
+    request<{
+      imported: number
+      already_present: number
+      skipped_invalid: number
+      skipped_blocked: number
+    }>('/api/import/opml', {
       method: 'POST',
       headers: { 'Content-Type': 'application/xml' },
       body: file,
