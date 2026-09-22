@@ -44,6 +44,10 @@ Cilium の `world` は **「クラスタ外」全般**で、インターネッ�
 **CNP の不足は構造的に見えない**。「クラスタ側の手当てが要る」と旗を立てるところまでが
 このリポジトリの担当で、実際に足すのは home-cluster 側の仕事になる。
 
+なお記事のサムネイル画像（`image_url`）は一覧表示時に閲覧者のブラウザが直接取得するもので、
+`rss-server` / `rss-fetcher` の egress ではない。画像が表示されなくても CNP や
+`allowed_outbound_hosts` を開ける必要はない（#145）。
+
 ## 過去に踏んだ例
 
 - 2026-09-15: `POST /api/feeds` の即時取得を足したが、`rss-server` の CNP に `world:443` が無く、
