@@ -338,6 +338,22 @@ body {
   color: var(--color-text-muted);
   margin-top: 4px;
 }
+.article-item--with-thumbnail {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+.article-item-body {
+  flex: 1;
+  min-width: 0;
+}
+.article-item-thumbnail {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
 
 /* Article detail panel */
 .article-detail {

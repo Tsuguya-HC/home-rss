@@ -37,6 +37,7 @@ pub struct Article {
     pub author: Option<String>,
     pub published_at: Option<i64>,
     pub fetched_at: Option<i64>,
+    pub image_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

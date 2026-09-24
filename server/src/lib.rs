@@ -111,7 +111,7 @@ const FEED_SELECT: &str = "SELECT id::text, url, title, site_url, etag, last_mod
 
 const ARTICLE_SELECT: &str = "SELECT a.id::text, a.feed_id::text, a.url, a.title, a.content, a.author, \
      EXTRACT(EPOCH FROM a.published_at)::bigint, \
-     EXTRACT(EPOCH FROM a.fetched_at)::bigint \
+     EXTRACT(EPOCH FROM a.fetched_at)::bigint, a.image_url \
      FROM articles a";
 
 fn row_to_feed(row: &Row) -> Result<Feed> {
@@ -128,6 +128,7 @@ fn row_to_article(row: &Row) -> Result<Article> {
         author: Option::<String>::decode(&row[5])?,
         published_at: Option::<i64>::decode(&row[6])?,
         fetched_at: Option::<i64>::decode(&row[7])?,
+        image_url: Option::<String>::decode(&row[8])?,
     })
 }
 

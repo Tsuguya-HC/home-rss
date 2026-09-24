@@ -18,6 +18,7 @@ export interface Article {
   author: string | null
   published_at: number | null
   fetched_at: number | null
+  image_url: string | null
 }
 
 export interface Stats {

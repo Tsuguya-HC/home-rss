@@ -180,6 +180,8 @@ async fn store(
             .iter()
             .map(|e| e.published_at.clone())
             .collect();
+        let image_urls: Vec<Option<String>> =
+            parsed.entries.iter().map(|e| e.image_url.clone()).collect();
 
         // UNNEST は各配列を独立に展開するので、長さが揃っていないと短い方が
         // NULL 埋めされずに行数がズレる。現状はすべて同じ entries から生成
@@ -188,12 +190,13 @@ async fn store(
         debug_assert_eq!(urls.len(), contents.len());
         debug_assert_eq!(urls.len(), authors.len());
         debug_assert_eq!(urls.len(), published_ats.len());
+        debug_assert_eq!(urls.len(), image_urls.len());
 
         conn.execute(
-            "INSERT INTO articles (feed_id, url, title, content, author, published_at) \
-             SELECT $1, u.url, u.title, u.content, u.author, u.published_at::timestamptz \
-             FROM UNNEST($2::text[], $3::text[], $4::text[], $5::text[], $6::text[]) \
-             AS u(url, title, content, author, published_at) \
+            "INSERT INTO articles (feed_id, url, title, content, author, published_at, image_url) \
+             SELECT $1, u.url, u.title, u.content, u.author, u.published_at::timestamptz, u.image_url \
+             FROM UNNEST($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[]) \
+             AS u(url, title, content, author, published_at, image_url) \
              ON CONFLICT DO NOTHING",
             vec![
                 ParameterValue::Uuid(feed_id.to_owned()),
@@ -202,6 +205,7 @@ async fn store(
                 contents.into(),
                 authors.into(),
                 published_ats.into(),
+                image_urls.into(),
             ],
         )
         .await
