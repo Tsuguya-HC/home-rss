@@ -161,13 +161,18 @@ async fn add_feed(req: Request) -> Result<Resp> {
     };
 
     let conn = db::connect().await?;
+    // `(xmax = 0)` で新規 INSERT か既存行ヒットかを区別する (#148)。
+    // PostgreSQL は INSERT 直後の行に xmax = 0 を付ける。`ON CONFLICT DO
+    // UPDATE` で既存行を拾った場合は xmax が 0 でない。`decode_feed_row`
+    // は先頭 8 列だけ読むので、9 列目の追加は一覧系のデコードに影響しない。
     let rows = conn
         .query(
             "INSERT INTO feeds (url) VALUES ($1) \
              ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
              RETURNING id::text, url, title, site_url, etag, last_modified, \
              EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
+             EXTRACT(EPOCH FROM created_at)::bigint, \
+             (xmax = 0) AS is_new",
             vec![ParameterValue::Str(url.to_string())],
         )
         .await?
@@ -177,7 +182,20 @@ async fn add_feed(req: Request) -> Result<Resp> {
     match rows.first() {
         Some(row) => {
             let feed = row_to_feed(row)?;
+            // デコードに失敗したら安全側（既存行扱い = 残す）に倒す。逆に倒すと
+            // articles が CASCADE で巻き添えになる既存行を消しかねない。
+            let is_new = bool::decode(&row[8]).unwrap_or(false);
             let outcome = immediate_fetch(&conn, &feed).await;
+            // 即時取得に失敗した新規行は残さない (#148)。残すとエラー応答と
+            // DB の状態が食い違い、再追加が UNIQUE 制約に当たって通らなくなる。
+            // 既存行ヒットの場合は should_keep_feed_row が残す判断をする。
+            if !should_keep_feed_row(&outcome, is_new) {
+                conn.execute(
+                    "DELETE FROM feeds WHERE id = $1",
+                    vec![ParameterValue::Uuid(feed.id.clone())],
+                )
+                .await?;
+            }
             Ok(immediate_fetch_response(&outcome))
         }
         None => Ok(error_response(
@@ -199,7 +217,8 @@ const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// フィード追加直後の即時取得 (#106)。取得〜保存の実処理は
 /// home_rss_shared::fetch::fetch_and_store に一本化されており、定期取得
-/// (fetcher) と同じコードを通る。失敗しても追加自体は残す。
+/// (fetcher) と同じコードを通る。失敗した新規行の取り消しは呼び出し側
+/// (add_feed + should_keep_feed_row, #148) が行う。
 async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> ImmediateFetchOutcome {
     match fetch_and_store(conn, &feed.id, &feed.url, None, None, Some(FETCH_TIMEOUT)).await {
         FetchAndStoreOutcome::Stored(updated) => ImmediateFetchOutcome::Fetched(updated),
@@ -221,6 +240,25 @@ async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> Immedi
             ImmediateFetchOutcome::StoreFailed
         }
     }
+}
+
+/// 即時取得の結果から、INSERT 直後の feed 行を残すかどうかを決める (#148)。
+/// 取得に失敗したのに行を残すと、ユーザーへの応答（エラー）と DB の状態が
+/// 食い違うため、新規行は取り消す（呼び出し側が DELETE する）。成功したら残す。
+/// 既存行（同じ URL の再追加で `ON CONFLICT` が既存行を拾った場合）は、
+/// 一時的な取得失敗で消してはならないので残す。呼び出し側は行が新規か
+/// 既存か（`RETURNING` に含める `xmax` が 0 か否かで区別できる）を `is_new`
+/// で渡すこと。
+fn should_keep_feed_row(outcome: &ImmediateFetchOutcome, is_new: bool) -> bool {
+    // 既存行（同じ URL の再追加で ON CONFLICT が既存行を拾った場合）は、
+    // 一時的な取得失敗で消してはならないので常に残す (#148)。
+    if !is_new {
+        return true;
+    }
+    // 新規行は取得に成功したときだけ残す。FetchFailed / Unparseable /
+    // StoreFailed はいずれもエラー応答になるので、行を残すと応答と DB の
+    // 状態が食い違う。呼び出し側が DELETE で取り消す。
+    matches!(outcome, ImmediateFetchOutcome::Fetched(_))
 }
 
 async fn delete_feed(id: &str) -> Result<Resp> {
@@ -554,6 +592,58 @@ mod tests {
             spin_sdk::http::StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_ne!(resp.status(), spin_sdk::http::StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn failed_first_fetch_drops_newly_inserted_feed_row() {
+        // issue #148: 新規追加の即時取得が失敗したら feed 行を残さない
+        // （エラー応答と DB の状態を一致させる）。
+        use super::{ImmediateFetchOutcome, should_keep_feed_row};
+        assert!(!should_keep_feed_row(
+            &ImmediateFetchOutcome::FetchFailed,
+            true
+        ));
+    }
+
+    #[test]
+    fn unparseable_first_fetch_drops_newly_inserted_feed_row() {
+        // FetchFailed と同じくエラー応答になる Unparseable も新規行は残さない。
+        use super::{ImmediateFetchOutcome, should_keep_feed_row};
+        assert!(!should_keep_feed_row(
+            &ImmediateFetchOutcome::Unparseable,
+            true
+        ));
+    }
+
+    #[test]
+    fn store_failed_first_fetch_drops_newly_inserted_feed_row() {
+        // StoreFailed もエラー応答になるので新規行は残さない。
+        use super::{ImmediateFetchOutcome, should_keep_feed_row};
+        assert!(!should_keep_feed_row(
+            &ImmediateFetchOutcome::StoreFailed,
+            true
+        ));
+    }
+
+    #[test]
+    fn successful_first_fetch_keeps_newly_inserted_feed_row() {
+        // 成功した新規行は残す（取り消し対象ではない）。
+        use super::{ImmediateFetchOutcome, should_keep_feed_row};
+        assert!(should_keep_feed_row(
+            &ImmediateFetchOutcome::Fetched(test_feed()),
+            true
+        ));
+    }
+
+    #[test]
+    fn failed_refetch_keeps_pre_existing_feed_row() {
+        // 同じ URL の再追加で既存行を拾った場合、一時的な取得失敗で
+        // 既存行まで消してはならない。
+        use super::{ImmediateFetchOutcome, should_keep_feed_row};
+        assert!(should_keep_feed_row(
+            &ImmediateFetchOutcome::FetchFailed,
+            false
+        ));
     }
 
     #[test]
