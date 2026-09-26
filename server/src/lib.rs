@@ -50,6 +50,17 @@ fn error_response(status: StatusCode, message: &str) -> Resp {
     json(status, format!(r#"{{"error":{body}}}"#))
 }
 
+/// パス/クエリ由来の id を UUID として検証する。PostgreSQL 側の値変換に
+/// 任せるとクライアントの入力ミスが `Err` → catch-all の 500 になるので、
+/// DB に触る前に弾いて 400 を返す。
+fn parse_uuid_param(id: &str) -> Option<uuid::Uuid> {
+    uuid::Uuid::parse_str(id).ok()
+}
+
+fn malformed_id_response() -> Result<Resp> {
+    Ok(error_response(StatusCode::BAD_REQUEST, "invalid id"))
+}
+
 /// POST /api/feeds の追加直後取得の結果 → HTTP 応答への写像 (#106)。
 /// 取得の失敗（到達不能・パース不能）はフィード取得自体の失敗としてユーザーに伝え、
 /// DB 書き込みの失敗はサーバ側の障害として区別して伝える。成功パスのみ 201 を使う。
@@ -224,11 +235,15 @@ async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> Immedi
 }
 
 async fn delete_feed(id: &str) -> Result<Resp> {
+    let parsed = match parse_uuid_param(id) {
+        Some(u) => u.to_string(),
+        None => return malformed_id_response(),
+    };
     let conn = db::connect().await?;
     let rows = conn
         .execute(
             "DELETE FROM feeds WHERE id = $1",
-            vec![ParameterValue::Uuid(id.to_owned())],
+            vec![ParameterValue::Uuid(parsed)],
         )
         .await?;
 
@@ -241,7 +256,13 @@ async fn delete_feed(id: &str) -> Result<Resp> {
 
 async fn list_articles(query: &str) -> Result<Resp> {
     let params_map = parse_query(query);
-    let feed_id = params_map.get("feed_id").cloned();
+    let feed_id = match params_map.get("feed_id").cloned() {
+        Some(fid) => match parse_uuid_param(&fid) {
+            Some(u) => Some(u.to_string()),
+            None => return malformed_id_response(),
+        },
+        None => None,
+    };
     let unread = params_map
         .get("unread")
         .map(|s| s == "true")
@@ -288,10 +309,25 @@ async fn list_articles(query: &str) -> Result<Resp> {
 }
 
 async fn mark_read(id: &str) -> Result<Resp> {
+    let parsed = match parse_uuid_param(id) {
+        Some(u) => u.to_string(),
+        None => return malformed_id_response(),
+    };
     let conn = db::connect().await?;
+    let existing = conn
+        .query(
+            "SELECT 1 FROM articles WHERE id = $1",
+            vec![ParameterValue::Uuid(parsed.clone())],
+        )
+        .await?
+        .collect()
+        .await?;
+    if existing.is_empty() {
+        return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+    }
     conn.execute(
         "INSERT INTO read_status (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        vec![ParameterValue::Uuid(id.to_owned())],
+        vec![ParameterValue::Uuid(parsed)],
     )
     .await?;
 

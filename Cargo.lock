@@ -409,6 +409,7 @@ dependencies = [
  "serde",
  "serde_json",
  "spin-sdk",
+ "uuid",
 ]
 
 [[package]]
