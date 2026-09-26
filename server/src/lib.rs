@@ -35,6 +35,8 @@ async fn route(req: Request) -> Result<Resp> {
         (&Method::GET, ["api", "articles"]) => list_articles(&query).await,
         (&Method::POST, ["api", "articles", "read-all"]) => mark_all_read().await,
         (&Method::POST, ["api", "articles", id, "read"]) => mark_read(id).await,
+        (&Method::POST, ["api", "articles", id, "favorite"]) => mark_favorite(id).await,
+        (&Method::DELETE, ["api", "articles", id, "favorite"]) => unmark_favorite(id).await,
         (&Method::POST, ["api", "import", "opml"]) => import_opml(req).await,
         (&Method::GET, ["api", "stats"]) => get_stats().await,
         _ => Ok(error_response(StatusCode::NOT_FOUND, "not found")),
@@ -111,7 +113,8 @@ const FEED_SELECT: &str = "SELECT id::text, url, title, site_url, etag, last_mod
 
 const ARTICLE_SELECT: &str = "SELECT a.id::text, a.feed_id::text, a.url, a.title, a.content, a.author, \
      EXTRACT(EPOCH FROM a.published_at)::bigint, \
-     EXTRACT(EPOCH FROM a.fetched_at)::bigint, a.image_url \
+     EXTRACT(EPOCH FROM a.fetched_at)::bigint, a.image_url, \
+     (fav.article_id IS NOT NULL) \
      FROM articles a";
 
 fn row_to_feed(row: &Row) -> Result<Feed> {
@@ -129,6 +132,7 @@ fn row_to_article(row: &Row) -> Result<Article> {
         published_at: Option::<i64>::decode(&row[6])?,
         fetched_at: Option::<i64>::decode(&row[7])?,
         image_url: Option::<String>::decode(&row[8])?,
+        is_favorite: bool::decode(&row[9])?,
     })
 }
 
@@ -246,40 +250,43 @@ async fn list_articles(query: &str) -> Result<Resp> {
         .get("unread")
         .map(|s| s == "true")
         .unwrap_or(false);
+    let favorite = params_map
+        .get("favorite")
+        .map(|s| s == "true")
+        .unwrap_or(false);
 
     let conn = db::connect().await?;
 
-    let (sql, query_params): (String, Vec<ParameterValue>) = match (feed_id, unread) {
-        (Some(fid), true) => (
-            format!(
-                "{ARTICLE_SELECT} \
-                 LEFT JOIN read_status rs ON a.id = rs.article_id \
-                 WHERE a.feed_id = $1 AND rs.article_id IS NULL \
-                 ORDER BY a.published_at DESC NULLS LAST"
-            ),
-            vec![ParameterValue::Uuid(fid)],
-        ),
-        (Some(fid), false) => (
-            format!(
-                "{ARTICLE_SELECT} \
-                 WHERE a.feed_id = $1 \
-                 ORDER BY a.published_at DESC NULLS LAST"
-            ),
-            vec![ParameterValue::Uuid(fid)],
-        ),
-        (None, true) => (
-            format!(
-                "{ARTICLE_SELECT} \
-                 LEFT JOIN read_status rs ON a.id = rs.article_id \
-                 WHERE rs.article_id IS NULL \
-                 ORDER BY a.published_at DESC NULLS LAST"
-            ),
-            vec![],
-        ),
-        (None, false) => (
-            format!("{ARTICLE_SELECT} ORDER BY a.published_at DESC NULLS LAST"),
-            vec![],
-        ),
+    // match で書き下すと 3 軸で 8 通りになるので、条件だけを足していく。
+    let mut conditions: Vec<String> = Vec::new();
+    let mut query_params: Vec<ParameterValue> = Vec::new();
+    if let Some(fid) = feed_id {
+        query_params.push(ParameterValue::Uuid(fid));
+        conditions.push(format!("a.feed_id = ${}", query_params.len()));
+    }
+    if unread {
+        conditions.push("rs.article_id IS NULL".to_owned());
+    }
+    if favorite {
+        conditions.push("fav.article_id IS NOT NULL".to_owned());
+    }
+
+    let sql = if conditions.is_empty() {
+        format!(
+            "{ARTICLE_SELECT} \
+             LEFT JOIN read_status rs ON a.id = rs.article_id \
+             LEFT JOIN favorites fav ON a.id = fav.article_id \
+             ORDER BY a.published_at DESC NULLS LAST"
+        )
+    } else {
+        format!(
+            "{ARTICLE_SELECT} \
+             LEFT JOIN read_status rs ON a.id = rs.article_id \
+             LEFT JOIN favorites fav ON a.id = fav.article_id \
+             WHERE {} \
+             ORDER BY a.published_at DESC NULLS LAST",
+            conditions.join(" AND ")
+        )
     };
 
     let rows = conn.query(sql, query_params).await?.collect().await?;
@@ -296,6 +303,71 @@ async fn mark_read(id: &str) -> Result<Resp> {
     .await?;
 
     Ok(empty(StatusCode::NO_CONTENT))
+}
+
+async fn mark_favorite(id: &str) -> Result<Resp> {
+    let conn = db::connect().await?;
+    // 存在しない記事は 404 (#152)。
+    if !article_exists(&conn, id).await? {
+        return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+    }
+    // cleaner は別プロセスで記事を消すため、上の存在確認とこの INSERT の
+    // 間に消えると FK 違反になる。その場合も存在しない記事への mark なので 404。
+    match conn
+        .execute(
+            "INSERT INTO favorites (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            vec![ParameterValue::Uuid(id.to_owned())],
+        )
+        .await
+    {
+        Ok(_) => Ok(empty(StatusCode::NO_CONTENT)),
+        Err(e) => {
+            if is_missing_article_insert(&e) && !article_exists(&conn, id).await? {
+                return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+            }
+            Err(e.into())
+        }
+    }
+}
+
+// テキスト照合だけだと他の FK 違反を拾いかねないので、PostgreSQL の
+// コード 23503 と制約名の両方で判定する。
+fn is_missing_article_insert(err: &spin_sdk::pg::Error) -> bool {
+    match err {
+        spin_sdk::pg::Error::PgError(spin_sdk::pg::PgError::QueryFailed(
+            spin_sdk::pg::QueryError::DbError(db),
+        )) => {
+            db.code == "23503"
+                && db
+                    .extras
+                    .iter()
+                    .any(|(k, v)| k == "constraint" && v == "favorites_article_id_fkey")
+        }
+        _ => false,
+    }
+}
+
+async fn unmark_favorite(id: &str) -> Result<Resp> {
+    let conn = db::connect().await?;
+    conn.execute(
+        "DELETE FROM favorites WHERE article_id = $1",
+        vec![ParameterValue::Uuid(id.to_owned())],
+    )
+    .await?;
+
+    Ok(empty(StatusCode::NO_CONTENT))
+}
+
+async fn article_exists(conn: &spin_sdk::pg::Connection, id: &str) -> Result<bool> {
+    let rows = conn
+        .query(
+            "SELECT 1 FROM articles WHERE id = $1",
+            vec![ParameterValue::Uuid(id.to_owned())],
+        )
+        .await?
+        .collect()
+        .await?;
+    Ok(!rows.is_empty())
 }
 
 async fn mark_all_read() -> Result<Resp> {
