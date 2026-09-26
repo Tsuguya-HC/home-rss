@@ -236,12 +236,7 @@ async fn cleaner_deletes_only_read_articles_past_retention() {
     mark_read_in_db(&db, &old_read).await;
     mark_read_in_db(&db, &recent_read).await;
 
-    let resp = reqwest::Client::new()
-        .post(format!("{}/clean", env("E2E_CLEANER_URL")))
-        .send()
-        .await
-        .expect("POST /clean");
-    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(run_cleaner().await, 200);
 
     let (_, left) = get_json("/api/articles").await;
     assert_eq!(titles(&left), ["old-unread", "recent-read"]);
@@ -277,6 +272,16 @@ async fn marking_a_missing_article_as_favorite_returns_404() {
     assert_eq!(mark_favorite(&article).await, 204);
     assert_eq!(
         mark_favorite("00000000-0000-0000-0000-000000000000").await,
+        404
+    );
+}
+
+#[tokio::test]
+async fn unmarking_a_missing_article_as_favorite_returns_404() {
+    fresh_db().await;
+
+    assert_eq!(
+        unmark_favorite("00000000-0000-0000-0000-000000000000").await,
         404
     );
 }

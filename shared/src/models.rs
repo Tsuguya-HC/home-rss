@@ -11,7 +11,6 @@ pub struct CreateFeedRequest {
 pub struct ArticleListQuery {
     pub feed_id: Option<String>,
     pub unread: Option<bool>,
-    pub favorite: Option<bool>,
 }
 
 // --- DB models ---

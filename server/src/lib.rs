@@ -308,14 +308,19 @@ async fn article_exists(conn: &spin_sdk::pg::Connection, id: &str) -> Result<boo
 
 async fn mark_favorite(id: &str) -> Result<Resp> {
     let conn = db::connect().await?;
-    if !article_exists(&conn, id).await? {
+    // INSERT と存在確認を 1 往復に畳む。確認→INSERT の 2 ホップでは間に
+    // フィード削除のカスケードが割り込んで FK 違反で 500 になっていた。
+    let affected = conn
+        .execute(
+            "INSERT INTO favorites (article_id) \
+             SELECT $1 WHERE EXISTS (SELECT 1 FROM articles WHERE id = $1) \
+             ON CONFLICT DO NOTHING",
+            vec![ParameterValue::Uuid(id.to_owned())],
+        )
+        .await?;
+    if affected == 0 && !article_exists(&conn, id).await? {
         return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
     }
-    conn.execute(
-        "INSERT INTO favorites (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        vec![ParameterValue::Uuid(id.to_owned())],
-    )
-    .await?;
 
     Ok(empty(StatusCode::NO_CONTENT))
 }
