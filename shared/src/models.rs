@@ -11,6 +11,7 @@ pub struct CreateFeedRequest {
 pub struct ArticleListQuery {
     pub feed_id: Option<String>,
     pub unread: Option<bool>,
+    pub favorite: Option<bool>,
 }
 
 // --- DB models ---
@@ -38,10 +39,17 @@ pub struct Article {
     pub published_at: Option<i64>,
     pub fetched_at: Option<i64>,
     pub image_url: Option<String>,
+    pub is_favorite: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReadStatus {
     pub article_id: String,
     pub read_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Favorite {
+    pub article_id: String,
+    pub favorited_at: Option<i64>,
 }
