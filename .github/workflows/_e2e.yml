@@ -1,0 +1,79 @@
+name: e2e
+
+# Runs e2e/run.sh: the server and the cleaner under `spin up` against a throwaway
+# PostgreSQL. Verification only; nothing here is published.
+on:
+  workflow_call:
+
+permissions: {}
+
+env:
+  # Must equal SPIN_CLI_VERSION in _build-rust.yml: e2e/run.sh refuses any other
+  # CLI, because a newer one can run components the cluster nodes cannot.
+  # renovate: datasource=github-releases depName=spinframework/spin
+  SPIN_CLI_VERSION: "4.0.2"
+  # The release has no checksum file, so the binary's hash is pinned here and has
+  # to be updated by hand together with the version.
+  # renovate: datasource=github-releases depName=amacneil/dbmate
+  DBMATE_VERSION: "2.36.0"
+  DBMATE_SHA256: "47e284b3d8cbad1ba5f090495aa05afd1bbd5f35e2ed5577aad06da74ce780ce"
+
+jobs:
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    services:
+      postgres:
+        # Same major as the cluster's CNPG cluster.
+        image: postgres:18@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
+        env:
+          POSTGRES_USER: rss
+          POSTGRES_PASSWORD: e2e
+          POSTGRES_DB: rss
+        # The components may only reach postgres://*:5432.
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rss"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        env:
+          # renovate: datasource=github-releases depName=rust-lang/rust
+          RUST_VERSION: "1.98.1"
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update --target wasm32-wasip1
+          rustup default "$RUST_VERSION"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            . -> target
+            e2e -> target
+
+      - uses: fermyon/actions/spin/setup@8849a6c41270af8e9f60f371982eddf33b8e35c9 # v1.0.12
+        with:
+          version: v${{ env.SPIN_CLI_VERSION }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dbmate
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/dbmate" \
+            "https://github.com/amacneil/dbmate/releases/download/v${DBMATE_VERSION}/dbmate-linux-amd64"
+          echo "${DBMATE_SHA256}  $RUNNER_TEMP/dbmate" | sha256sum -c -
+          install -m 0755 "$RUNNER_TEMP/dbmate" /usr/local/bin/dbmate
+
+      - name: Run e2e/run.sh
+        env:
+          E2E_DATABASE_URL: postgres://rss:e2e@localhost:5432/rss?sslmode=disable
+        run: e2e/run.sh
