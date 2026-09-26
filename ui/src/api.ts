@@ -52,16 +52,23 @@ export const api = {
   deleteFeed: (id: string) =>
     request<void>(`/api/feeds/${id}`, { method: 'DELETE' }),
 
-  getArticles: (feedId?: string | null, unread?: boolean) => {
+  getArticles: (feedId?: string | null, unread?: boolean, favoritesOnly?: boolean) => {
     const params = new URLSearchParams()
     if (feedId) params.set('feed_id', feedId)
     if (unread) params.set('unread', 'true')
+    if (favoritesOnly) params.set('favorites', 'true')
     const query = params.toString()
     return request<Article[]>(`/api/articles${query ? `?${query}` : ''}`)
   },
 
   markRead: (id: string) =>
     request<void>(`/api/articles/${id}/read`, { method: 'POST' }),
+
+  markFavorite: (id: string) =>
+    request<void>(`/api/articles/${id}/favorite`, { method: 'POST' }),
+
+  unmarkFavorite: (id: string) =>
+    request<void>(`/api/articles/${id}/favorite`, { method: 'DELETE' }),
 
   markAllRead: () =>
     request<void>('/api/articles/read-all', { method: 'POST' }),
