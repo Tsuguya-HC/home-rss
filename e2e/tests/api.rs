@@ -187,6 +187,34 @@ async fn adding_a_feed_rejects_urls_the_fetcher_must_not_reach() {
 }
 
 #[tokio::test]
+async fn marking_read_rejects_unknown_and_malformed_article_ids() {
+    let _db = fresh_db().await;
+    // 未使用の UUID: fresh_db が全テーブルを空にするのでこの値は articles に存在しない。
+    assert_eq!(
+        post("/api/articles/11111111-1111-1111-1111-111111111111/read", None).await,
+        404
+    );
+    assert_eq!(post("/api/articles/not-a-uuid/read", None).await, 400);
+}
+
+#[tokio::test]
+async fn deleting_a_feed_rejects_malformed_id_and_keeps_404_for_unknown_uuid() {
+    let _db = fresh_db().await;
+    assert_eq!(delete("/api/feeds/not-a-uuid").await, 400);
+    assert_eq!(
+        delete("/api/feeds/11111111-1111-1111-1111-111111111111").await,
+        404
+    );
+}
+
+#[tokio::test]
+async fn article_list_rejects_malformed_feed_id() {
+    let _db = fresh_db().await;
+    let (status, _) = get_json("/api/articles?feed_id=not-a-uuid").await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
 async fn cleaner_deletes_only_read_articles_past_retention() {
     let db = fresh_db().await;
     let feed = seed_feed(&db, "https://a.example/feed").await;
