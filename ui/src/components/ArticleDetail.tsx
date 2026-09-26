@@ -5,9 +5,10 @@ import { formatDateTime } from '../lib/date'
 interface ArticleDetailProps {
   article: Article
   onBack: () => void
+  onToggleFavorite: (article: Article) => void
 }
 
-export function ArticleDetail({ article, onBack }: ArticleDetailProps) {
+export function ArticleDetail({ article, onBack, onToggleFavorite }: ArticleDetailProps) {
   const date = article.published_at ? formatDateTime(article.published_at) : null
 
   return (
@@ -15,6 +16,13 @@ export function ArticleDetail({ article, onBack }: ArticleDetailProps) {
       <div className="detail-header">
         <button className="btn-icon back-btn mobile-back-btn" onClick={onBack} title="戻る">
           ←
+        </button>
+        <button
+          className="btn-icon favorite-toggle"
+          title={article.is_favorite ? 'お気に入りを外す' : 'お気に入りにする'}
+          onClick={() => onToggleFavorite(article)}
+        >
+          {article.is_favorite ? '★' : '☆'}
         </button>
         <a
           href={article.url}
@@ -26,7 +34,10 @@ export function ArticleDetail({ article, onBack }: ArticleDetailProps) {
         </a>
       </div>
       <article className="detail-article">
-        <h1 className="detail-title">{article.title}</h1>
+        <h1 className="detail-title">
+          {article.is_favorite && <span className="favorite-mark">★ </span>}
+          {article.title}
+        </h1>
         <div className="detail-meta">
           {article.author && <span>{article.author}</span>}
           {date && <span>{date}</span>}
