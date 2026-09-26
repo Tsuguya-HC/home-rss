@@ -54,6 +54,7 @@ jobs:
       pull-requests: read # dorny/paths-filter が PR の変更ファイル一覧を API 取得するために必要
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      e2e: ${{ steps.filter.outputs.e2e }}
       ui: ${{ steps.filter.outputs.ui }}
       workflows: ${{ steps.filter.outputs.workflows }}
       renovate: ${{ steps.filter.outputs.renovate }}
@@ -76,6 +77,17 @@ jobs:
               - '.cargo/**'
               - '.github/workflows/_build-rust.yml'
               - '.github/workflows/_test.yml'
+            e2e:
+              - 'server/**'
+              - 'cleaner/**'
+              - 'shared/**'
+              - 'migrations/**'
+              - 'e2e/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - '.github/workflows/_e2e.yml'
+              - '.github/workflows/_build-rust.yml'
             ui:
               - 'ui/**'
               - '.github/workflows/_build-ui.yml'
@@ -103,6 +115,13 @@ jobs:
     needs: detect
     if: ${{ needs.detect.outputs.rust == 'true' }}
     uses: ./.github/workflows/_test.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
+  e2e:
+    needs: detect
+    if: ${{ needs.detect.outputs.e2e == 'true' }}
+    uses: ./.github/workflows/_e2e.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
 
@@ -143,7 +162,7 @@ jobs:
   # 緑」が必須チェックを満たしてしまう。
   gate:
     name: CI Gate
-    needs: [detect, build-rust, test, build-ui, lint-workflows, lint-renovate]
+    needs: [detect, build-rust, test, e2e, build-ui, lint-workflows, lint-renovate]
     # `always()` ではなく `!cancelled()`。always() だと run をキャンセルしたとき
     # 全ての leaf が `cancelled` を返し、下の case をすり抜けて必須チェックが
     # 失敗として記録される。キャンセルされた run に下すべき判定は無い。

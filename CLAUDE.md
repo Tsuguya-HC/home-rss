@@ -91,6 +91,25 @@ dbmate --url "postgres://user:pass@localhost:5432/rssreader?sslmode=disable" up
 
 本番では ArgoCD PreSync Hook Job (home-cluster 側) が `dbmate up` を実行する。
 
+### e2e
+
+DB に触る処理（SQL・行のデコード・応答の形）は `cargo test` では確かめられない
+（`spin_sdk::pg` は Spin の中にしか無い）。`e2e/run.sh` が server と cleaner を
+`spin up` で立て、実際の PostgreSQL に対して `e2e/tests` を回す。
+
+```bash
+docker run -d --rm --name rss-e2e-pg -e POSTGRES_PASSWORD=e2e -e POSTGRES_DB=rss postgres:18
+IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' rss-e2e-pg)
+E2E_DATABASE_URL="postgres://postgres:e2e@${IP}:5432/rss?sslmode=disable" e2e/run.sh
+```
+
+- DB は使い捨てのものを渡す。テストのたびに全テーブルを空にする
+- DSN のポートは 5432 に限る（components の `allowed_outbound_hosts` が `postgres://*:5432`）
+- Spin CLI はリリースと同じ版（`_build-rust.yml` の `SPIN_CLI_VERSION`）でないと止まる。
+  新しい CLI は、ノードが動かせない component でも緑にしてしまう
+- DB を渡さなければ失敗する。skip はしない
+- シナリオは HTTP を叩き、データは DB に直接入れる。外部のフィードは取得しない
+
 ### 並列開発
 
 worktree を切って server/ui/fetcher/cleaner を並列セッションで開発可能。
