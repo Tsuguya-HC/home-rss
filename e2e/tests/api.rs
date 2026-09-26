@@ -220,6 +220,80 @@ async fn marking_favorite_is_idempotent_both_ways() {
     assert_eq!(items[0]["is_favorite"], false);
 }
 
+async fn post_async(path: String, body: Option<String>) -> u16 {
+    let mut req = reqwest::Client::new().post(server(&path));
+    if let Some(body) = body {
+        req = req.header("content-type", "application/json").body(body);
+    }
+    req.send().await.expect("POST").status().as_u16()
+}
+
+#[tokio::test]
+async fn marking_favorite_deleted_mid_request_returns_not_found() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "one", 1).await;
+
+    // Block the server's INSERT INTO favorites with a trigger that waits on
+    // an advisory lock we hold, so the delete lands between its existence
+    // check and its INSERT without any timing guesswork. This test never
+    // inserts into favorites itself, so the trigger needs no exclusion.
+    db.batch_execute(
+        "DROP TRIGGER IF EXISTS e2e_hold_favorite_insert ON favorites; \
+         CREATE OR REPLACE FUNCTION e2e_hold_favorite_insert() RETURNS trigger \
+         LANGUAGE plpgsql AS $$BEGIN \
+           PERFORM pg_advisory_xact_lock(424242, 1); \
+           RETURN NEW; END$$; \
+         CREATE TRIGGER e2e_hold_favorite_insert BEFORE INSERT ON favorites \
+         FOR EACH ROW EXECUTE FUNCTION e2e_hold_favorite_insert(); \
+         SELECT pg_advisory_lock(424242, 1)",
+    )
+    .await
+    .expect("install blocking trigger and take lock");
+
+    let favorite = tokio::spawn(post_async(
+        format!("/api/articles/{article}/favorite"),
+        None,
+    ));
+    // Wait until the POST is inside the trigger (blocked on our lock); a
+    // fixed sleep would let it finish before the delete or fire too early.
+    // The polling query mentions favorites too, so our own backend is excluded.
+    for _ in 0..2000 {
+        let n: i64 = db
+            .query_one(
+                "SELECT COUNT(*) FROM pg_stat_activity \
+                 WHERE pid <> pg_backend_pid() AND state = 'active' \
+                 AND query LIKE '%INSERT INTO favorites%'",
+                &[],
+            )
+            .await
+            .expect("poll pg_stat_activity")
+            .get(0);
+        if n > 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    // Same DELETE the cleaner issues; the row the existence check saw is now
+    // gone, so the unblocked INSERT hits the favorites.article_id foreign
+    // key. That must surface as 404, not 500.
+    db.execute(
+        "DELETE FROM articles WHERE id = $1::text::uuid",
+        &[&article],
+    )
+    .await
+    .expect("delete article mid-request");
+    db.batch_execute(
+        "SELECT pg_advisory_unlock(424242, 1); \
+         DROP TRIGGER e2e_hold_favorite_insert ON favorites; \
+         DROP FUNCTION e2e_hold_favorite_insert()",
+    )
+    .await
+    .expect("release lock and drop trigger");
+
+    assert_eq!(favorite.await.expect("favorite response"), 404);
+}
+
 #[tokio::test]
 async fn marking_a_missing_article_as_favorite_returns_not_found() {
     let db = fresh_db().await;
@@ -229,8 +303,7 @@ async fn marking_a_missing_article_as_favorite_returns_not_found() {
     assert_eq!(post(&format!("/api/articles/{article}/favorite"), None).await, 204);
 
     let missing = "00000000-0000-0000-0000-000000000000";
-    // A missing article must surface as 404, not as a foreign-key 500
-    // (the existing read endpoint answers 500 here).
+    // A missing article must surface as 404.
     assert_eq!(post(&format!("/api/articles/{missing}/favorite"), None).await, 404);
     assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 1);
 }

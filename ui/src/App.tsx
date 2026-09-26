@@ -182,9 +182,9 @@ export default function App() {
     })
   }
 
-  const visibleArticles = showUnreadOnly
-    ? articles.filter((a) => !readIds.has(a.id))
-    : articles
+  const visibleArticles = articles
+    .filter((a) => !showUnreadOnly || !readIds.has(a.id))
+    .filter((a) => !showFavoritesOnly || a.is_favorite)
 
   const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0)
 

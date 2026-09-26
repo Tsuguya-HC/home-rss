@@ -257,9 +257,7 @@ async fn list_articles(query: &str) -> Result<Resp> {
 
     let conn = db::connect().await?;
 
-    // read_status と同じ形の一覧用 JOIN (#152)。is_favorite は表示に使い、
-    // unread/favorite の絞り込みは断片を畳み込む。match で書き下すと 3 軸で
-    // 8 通りになるので、条件だけを足していく。
+    // match で書き下すと 3 軸で 8 通りになるので、条件だけを足していく。
     let mut conditions: Vec<String> = Vec::new();
     let mut query_params: Vec<ParameterValue> = Vec::new();
     if let Some(fid) = feed_id {
@@ -309,19 +307,44 @@ async fn mark_read(id: &str) -> Result<Resp> {
 
 async fn mark_favorite(id: &str) -> Result<Resp> {
     let conn = db::connect().await?;
-    // 存在しない記事への INSERT は favorites.article_id の FK 制約に当たる
-    // (#152)。read_status 側はそのまま Err → 500 になる形だが、favorites は
-    // 404 が要求されているので先に存在を確認する（read 側の挙動は範囲外）。
+    // 存在しない記事は 404 (#152)。
     if !article_exists(&conn, id).await? {
         return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
     }
-    conn.execute(
-        "INSERT INTO favorites (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        vec![ParameterValue::Uuid(id.to_owned())],
-    )
-    .await?;
+    // cleaner は別プロセスで記事を消すため、上の存在確認とこの INSERT の
+    // 間に消えると FK 違反になる。その場合も存在しない記事への mark なので 404。
+    match conn
+        .execute(
+            "INSERT INTO favorites (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            vec![ParameterValue::Uuid(id.to_owned())],
+        )
+        .await
+    {
+        Ok(_) => Ok(empty(StatusCode::NO_CONTENT)),
+        Err(e) => {
+            if is_missing_article_insert(&e) && !article_exists(&conn, id).await? {
+                return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+            }
+            Err(e.into())
+        }
+    }
+}
 
-    Ok(empty(StatusCode::NO_CONTENT))
+// テキスト照合だけだと他の FK 違反を拾いかねないので、PostgreSQL の
+// コード 23503 と制約名の両方で判定する。
+fn is_missing_article_insert(err: &spin_sdk::pg::Error) -> bool {
+    match err {
+        spin_sdk::pg::Error::PgError(spin_sdk::pg::PgError::QueryFailed(
+            spin_sdk::pg::QueryError::DbError(db),
+        )) => {
+            db.code == "23503"
+                && db
+                    .extras
+                    .iter()
+                    .any(|(k, v)| k == "constraint" && v == "favorites_article_id_fkey")
+        }
+        _ => false,
+    }
 }
 
 async fn unmark_favorite(id: &str) -> Result<Resp> {
