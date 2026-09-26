@@ -220,14 +220,6 @@ async fn marking_favorite_is_idempotent_both_ways() {
     assert_eq!(items[0]["is_favorite"], false);
 }
 
-async fn post_async(path: String, body: Option<String>) -> u16 {
-    let mut req = reqwest::Client::new().post(server(&path));
-    if let Some(body) = body {
-        req = req.header("content-type", "application/json").body(body);
-    }
-    req.send().await.expect("POST").status().as_u16()
-}
-
 #[tokio::test]
 async fn marking_favorite_deleted_mid_request_returns_not_found() {
     let db = fresh_db().await;
@@ -251,10 +243,8 @@ async fn marking_favorite_deleted_mid_request_returns_not_found() {
     .await
     .expect("install blocking trigger and take lock");
 
-    let favorite = tokio::spawn(post_async(
-        format!("/api/articles/{article}/favorite"),
-        None,
-    ));
+    let path = format!("/api/articles/{article}/favorite");
+    let favorite = tokio::spawn(async move { post(&path, None).await });
     // Wait until the POST is inside the trigger (blocked on our lock); a
     // fixed sleep would let it finish before the delete or fire too early.
     // The polling query mentions favorites too, so our own backend is excluded.
@@ -274,9 +264,8 @@ async fn marking_favorite_deleted_mid_request_returns_not_found() {
         }
         tokio::task::yield_now().await;
     }
-    // Same DELETE the cleaner issues; the row the existence check saw is now
-    // gone, so the unblocked INSERT hits the favorites.article_id foreign
-    // key. That must surface as 404, not 500.
+    // Delete the row the existence check saw, so the unblocked INSERT hits
+    // the favorites.article_id foreign key. That must surface as 404, not 500.
     db.execute(
         "DELETE FROM articles WHERE id = $1::text::uuid",
         &[&article],
@@ -377,6 +366,90 @@ async fn cleaner_keeps_favorites_read_or_not_and_unmarking_reenlists() {
 
     let (_, left) = get_json("/api/articles").await;
     assert_eq!(titles(&left), ["fav-unread", "plain-unread"]);
+}
+
+#[tokio::test]
+async fn cleaner_running_while_an_article_is_favorited_keeps_that_article() {
+    // 採用 #1 が捕まえる変異: cleaner の DELETE は文開始時のスナップショットで
+    // NOT EXISTS (favorites) を評価する。直前の仕分けがこの Pod で実行して確かめた
+    // 通り、文が動き始めた後に付けたお気に入りは DELETE には見えず、204 を返した
+    // 直後に記事ごと消える。articles への BEFORE DELETE 文トリガで DELETE 本体を
+    // 数秒止め、その隙に POST /favorite を成功させてから再開させるので、競合の
+    // 窓はタイミングの推測ではなくトリガが作る。このテストは今落ちる（204 の後で
+    // 両テーブルとも空になる）。
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "raced", 15).await;
+    mark_read_in_db(&db, &article).await;
+
+    // 文のスナップショットはトリガより先に確定する（この Pod で psql から実測）。
+    // pg_sleep は行の顔ぶれを変えないので、止めるだけで結果は変えないはずだが、
+    // 今の実装は止めている間の INSERT を見ずに消す。トリガは TRUNCATE では
+    // 消えないので、作る前にも消してから作り（前の失敗の残骸を拾わない）、
+    // 最後にも必ず外す。
+    db.batch_execute(
+        "DROP TRIGGER IF EXISTS e2e_hold_article_delete ON articles; \
+         DROP FUNCTION IF EXISTS e2e_hold_article_delete(); \
+         CREATE FUNCTION e2e_hold_article_delete() RETURNS trigger \
+         LANGUAGE plpgsql AS $$BEGIN PERFORM pg_sleep(4); RETURN NULL; END$$; \
+         CREATE TRIGGER e2e_hold_article_delete BEFORE DELETE ON articles \
+         FOR EACH STATEMENT EXECUTE FUNCTION e2e_hold_article_delete()",
+    )
+    .await
+    .expect("install delete-holding trigger");
+
+    let clean = tokio::spawn({
+        let url = format!("{}/clean", env("E2E_CLEANER_URL"));
+        async move {
+            reqwest::Client::new()
+                .post(url)
+                .send()
+                .await
+                .expect("POST /clean")
+                .status()
+                .as_u16()
+        }
+    });
+    // DELETE がトリガの中で止まっている（＝文が始まりスナップショットが確定した
+    // 後）のを pg_stat_activity で確認してから POST する。固定の sleep では
+    // DELETE がまだ始まっていない／もう終わっている競合が残る。自分自身は除き、
+    // この問い合わせ自体は articles に触れない。
+    let mut saw_delete = false;
+    for _ in 0..2000 {
+        let n: i64 = db
+            .query_one(
+                "SELECT COUNT(*) FROM pg_stat_activity \
+                 WHERE pid <> pg_backend_pid() AND state = 'active' \
+                 AND query LIKE '%DELETE FROM articles%'",
+                &[],
+            )
+            .await
+            .expect("poll pg_stat_activity")
+            .get(0);
+        if n > 0 {
+            saw_delete = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    // DELETE がトリガに入る前に終わる競合では、競合を再現できていないので
+    // 誤って通さず落とす。
+    assert!(saw_delete, "cleaner DELETE never entered the delete trigger");
+    // お気に入り登録は DELETE の実行中（スナップショット確定後）に成功する。
+    assert_eq!(
+        post(&format!("/api/articles/{article}/favorite"), None).await,
+        204
+    );
+    assert_eq!(clean.await.expect("cleaner response"), 200);
+    db.batch_execute(
+        "DROP TRIGGER e2e_hold_article_delete ON articles; \
+         DROP FUNCTION e2e_hold_article_delete()",
+    )
+    .await
+    .expect("drop delete-holding trigger");
+    // 直った実装はこの競合でも記事を消さない。今の実装は消すので落ちる。
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 1);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 1);
 }
 
 #[tokio::test]
