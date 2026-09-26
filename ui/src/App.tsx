@@ -14,6 +14,7 @@ export default function App() {
   const [selectedFeedId, setSelectedFeedId] = useState<string | null>(null)
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null)
   const [showUnreadOnly, setShowUnreadOnly] = useState(true)
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
   const [readIds, setReadIds] = useState<Set<string>>(new Set())
   const [mobileView, setMobileView] = useState<MobileView>('list')
   const [error, setError] = useState<string | null>(null)
@@ -42,16 +43,32 @@ export default function App() {
     setFeeds(feeds)
   }, [loadUnreadCounts])
 
+  const [favoriteOverrides, setFavoriteOverrides] = useState<Record<string, boolean>>({})
+
   const loadArticles = useCallback(async () => {
     setLoadingArticles(true)
     try {
-      const articles = await api.getArticles(selectedFeedId, showUnreadOnly)
+      const articles = await api.getArticles(selectedFeedId, showUnreadOnly, showFavoritesOnly)
+      setFavoriteOverrides((prev) => {
+        if (Object.keys(prev).length === 0) return prev
+        const fetched = new Map(articles.map((a) => [a.id, a.is_favorite] as const))
+        let dropped = false
+        const next: Record<string, boolean> = {}
+        for (const [id, want] of Object.entries(prev)) {
+          // 204 を受けた分だけが上書きとして残り、後の GET で裏付けの取れた分は
+          // 落とす。一覧に無い記事の分は残る（お気に入りのみ表示で外れた記事や、
+          // まだ裏付けの無い 204 未確定のトグル）。
+          if (fetched.get(id) === want) dropped = true
+          else next[id] = want
+        }
+        return dropped ? next : prev
+      })
       setArticles(articles)
       setReadIds(new Set())
     } finally {
       setLoadingArticles(false)
     }
-  }, [selectedFeedId, showUnreadOnly])
+  }, [selectedFeedId, showUnreadOnly, showFavoritesOnly])
 
   useEffect(() => {
     withError(loadFeeds)
@@ -85,6 +102,20 @@ export default function App() {
       await api.markAllRead()
       setReadIds(new Set(articles.map((a) => a.id)))
       setUnreadCounts({})
+    })
+
+  const handleToggleFavorite = (article: Article) =>
+    withError(async () => {
+      const next = !(favoriteOverrides[article.id] ?? article.is_favorite)
+      if (next) {
+        await api.markFavorite(article.id)
+      } else {
+        await api.unmarkFavorite(article.id)
+      }
+      // 204 を受けたトグルのみ上書きに残し、選別中の後着の古い一覧で
+      // 消されないようにする。既に処理済みの loadArticles が裏付けた分は
+      // そこで落ちる。
+      setFavoriteOverrides((prev) => ({ ...prev, [article.id]: next }))
     })
 
   const handleAddFeed = async (url: string) => {
@@ -168,9 +199,20 @@ export default function App() {
     })
   }
 
-  const visibleArticles = showUnreadOnly
-    ? articles.filter((a) => !readIds.has(a.id))
-    : articles
+  // GET の応答待ち中に確定したトグルを、後着の古い一覧で消さないための
+  // 上書き。204 を受けた分だけが残り、裏付けの取れた分は loadArticles が落とす。
+  const withFavoriteOverrides = (a: Article): Article =>
+    a.id in favoriteOverrides ? { ...a, is_favorite: favoriteOverrides[a.id] } : a
+
+  const effectiveArticles = articles.map(withFavoriteOverrides)
+  const effectiveSelected = selectedArticle
+    ? withFavoriteOverrides(selectedArticle)
+    : null
+
+  const visibleArticles = effectiveArticles.filter(
+    (a) =>
+      (!showFavoritesOnly || a.is_favorite) && (!showUnreadOnly || !readIds.has(a.id)),
+  )
 
   const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0)
 
@@ -200,22 +242,29 @@ export default function App() {
             articles={visibleArticles}
             loading={loadingArticles}
             showUnreadOnly={showUnreadOnly}
-            selectedArticle={selectedArticle}
+            showFavoritesOnly={showFavoritesOnly}
+            selectedArticle={effectiveSelected}
             onToggleUnread={() => {
               setShowUnreadOnly((v) => !v)
+              setSelectedArticle(null)
+            }}
+            onToggleFavorites={() => {
+              setShowFavoritesOnly((v) => !v)
               setSelectedArticle(null)
             }}
             onSelectArticle={handleSelectArticle}
             onMarkAllRead={handleMarkAllRead}
             onShowSidebar={() => setMobileView('sidebar')}
+            onToggleFavorite={handleToggleFavorite}
           />
         </section>
 
         <section className={`article-detail${mobileView !== 'detail' ? ' article-detail--hidden' : ''}`}>
-          {selectedArticle ? (
+          {effectiveSelected ? (
             <ArticleDetail
-              article={selectedArticle}
+              article={effectiveSelected}
               onBack={() => setMobileView('list')}
+              onToggleFavorite={() => handleToggleFavorite(effectiveSelected)}
             />
           ) : (
             <div className="detail-placeholder">記事を選択してください</div>
