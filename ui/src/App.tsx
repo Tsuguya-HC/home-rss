@@ -14,6 +14,7 @@ export default function App() {
   const [selectedFeedId, setSelectedFeedId] = useState<string | null>(null)
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null)
   const [showUnreadOnly, setShowUnreadOnly] = useState(true)
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
   const [readIds, setReadIds] = useState<Set<string>>(new Set())
   const [mobileView, setMobileView] = useState<MobileView>('list')
   const [error, setError] = useState<string | null>(null)
@@ -45,13 +46,13 @@ export default function App() {
   const loadArticles = useCallback(async () => {
     setLoadingArticles(true)
     try {
-      const articles = await api.getArticles(selectedFeedId, showUnreadOnly)
+      const articles = await api.getArticles(selectedFeedId, showUnreadOnly, showFavoritesOnly)
       setArticles(articles)
       setReadIds(new Set())
     } finally {
       setLoadingArticles(false)
     }
-  }, [selectedFeedId, showUnreadOnly])
+  }, [selectedFeedId, showUnreadOnly, showFavoritesOnly])
 
   useEffect(() => {
     withError(loadFeeds)
@@ -67,6 +68,11 @@ export default function App() {
     setMobileView('list')
   }
 
+  const applyFavorite = (id: string, favorite: boolean) => {
+    setArticles((prev) => prev.map((a) => (a.id === id ? { ...a, favorite } : a)))
+    setSelectedArticle((prev) => (prev && prev.id === id ? { ...prev, favorite } : prev))
+  }
+
   const handleSelectArticle = async (article: Article) => {
     setSelectedArticle(article)
     setMobileView('detail')
@@ -79,6 +85,22 @@ export default function App() {
       }))
     })
   }
+
+  const handleToggleFavorite = (article: Article) =>
+    withError(async () => {
+      const next = !article.favorite
+      applyFavorite(article.id, next)
+      try {
+        if (next) {
+          await api.markFavorite(article.id)
+        } else {
+          await api.unmarkFavorite(article.id)
+        }
+      } catch (e) {
+        applyFavorite(article.id, article.favorite)
+        throw e
+      }
+    })
 
   const handleMarkAllRead = () =>
     withError(async () => {
@@ -200,12 +222,18 @@ export default function App() {
             articles={visibleArticles}
             loading={loadingArticles}
             showUnreadOnly={showUnreadOnly}
+            showFavoritesOnly={showFavoritesOnly}
             selectedArticle={selectedArticle}
             onToggleUnread={() => {
               setShowUnreadOnly((v) => !v)
               setSelectedArticle(null)
             }}
+            onToggleFavorites={() => {
+              setShowFavoritesOnly((v) => !v)
+              setSelectedArticle(null)
+            }}
             onSelectArticle={handleSelectArticle}
+            onToggleFavorite={handleToggleFavorite}
             onMarkAllRead={handleMarkAllRead}
             onShowSidebar={() => setMobileView('sidebar')}
           />
@@ -216,6 +244,7 @@ export default function App() {
             <ArticleDetail
               article={selectedArticle}
               onBack={() => setMobileView('list')}
+              onToggleFavorite={handleToggleFavorite}
             />
           ) : (
             <div className="detail-placeholder">記事を選択してください</div>

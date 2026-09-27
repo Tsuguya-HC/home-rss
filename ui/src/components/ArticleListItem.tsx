@@ -6,9 +6,10 @@ interface ArticleListItemProps {
   article: Article
   isSelected: boolean
   onClick: () => void
+  onToggleFavorite: (article: Article) => void
 }
 
-export function ArticleListItem({ article, isSelected, onClick }: ArticleListItemProps) {
+export function ArticleListItem({ article, isSelected, onClick, onToggleFavorite }: ArticleListItemProps) {
   const date = article.published_at ? formatDate(article.published_at) : null
   const [imgHidden, setImgHidden] = useState(false)
 
@@ -24,7 +25,20 @@ export function ArticleListItem({ article, isSelected, onClick }: ArticleListIte
       onClick={onClick}
     >
       <div className="article-item-body">
-        <div className="article-item-title">{article.title}</div>
+        <div className="article-item-title">
+          <button
+            className="btn-icon favorite-btn"
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleFavorite(article)
+            }}
+            title={article.favorite ? 'お気に入りを解除' : 'お気に入りに追加'}
+            aria-label={article.favorite ? 'お気に入りを解除' : 'お気に入りに追加'}
+          >
+            {article.favorite ? '★' : '☆'}
+          </button>
+          {article.title}
+        </div>
         {date && <div className="article-item-date">{date}</div>}
       </div>
       {imageUrl && (
