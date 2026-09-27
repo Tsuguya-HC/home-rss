@@ -24,6 +24,10 @@ export default function App() {
   // 同期的に見るのは、state の再レンダーが間に合わない連打を防ぐため。
   const favoritePending = useRef<Set<string>>(new Set())
   const [, setFavoritePendingTick] = useState(0)
+  const showFavoritesOnlyRef = useRef(showFavoritesOnly)
+  useEffect(() => {
+    showFavoritesOnlyRef.current = showFavoritesOnly
+  }, [showFavoritesOnly])
 
   const withError = async (fn: () => Promise<void>) => {
     try {
@@ -114,8 +118,11 @@ export default function App() {
           await api.markFavorite(article.id)
         }
         const isFavorite = !article.is_favorite
+        // 完了処理が走る頃には showFavoritesOnly が変わっている場合がある。
+        // 呼び出し時点の値をクロージャで見ると、フィルタ OFF なのに解除した
+        // 記事だけが一覧から消える。最新の値を ref 経由で見る。
         setArticles((prev) => {
-          if (showFavoritesOnly && !isFavorite) {
+          if (showFavoritesOnlyRef.current && !isFavorite) {
             return prev.filter((a) => a.id !== article.id)
           }
           return prev.map((a) => (a.id === article.id ? { ...a, is_favorite: isFavorite } : a))

@@ -294,6 +294,36 @@ async fn favorite_with_malformed_article_id_returns_404_not_500() {
 }
 
 #[tokio::test]
+async fn favorite_with_non_hex_uuid_shaped_id_returns_404_not_500() {
+    // 仕分け 1 が捕まえる変異: article_id_is_uuid_shaped から hex 判定を
+    // 外すと、長さの形だけ合った非 hex の ID がガードを通過して
+    // ParameterValue::Uuid の変換で 500 に落ちる。"not-a-uuid" では
+    // 最初のセグメント長で弾かれるため hex の有無を区別できない。
+    fresh_db().await;
+    let client = reqwest::Client::new();
+    // 長さは 8-4-4-4-12 だが 'g' は hex ではない。
+    let id = "gggggggg-gggg-gggg-gggg-gggggggggggg";
+
+    let resp = client
+        .post(server(&format!("/api/articles/{id}/favorite")))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status().as_u16(), 404);
+    let body: Value = resp.json().await.expect("JSON body");
+    assert_eq!(body, serde_json::json!({"error": "article not found"}));
+
+    let resp = client
+        .delete(server(&format!("/api/articles/{id}/favorite")))
+        .send()
+        .await
+        .expect("DELETE");
+    assert_eq!(resp.status().as_u16(), 404);
+    let body: Value = resp.json().await.expect("JSON body");
+    assert_eq!(body, serde_json::json!({"error": "article not found"}));
+}
+
+#[tokio::test]
 async fn unmarking_one_favorite_keeps_other_favorites() {
     // 仕分け 3 が捕まえる変異: unmark_favorite の DELETE から
     // WHERE article_id = $1 を落としても既存テストは全て通る。
