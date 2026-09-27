@@ -35,6 +35,8 @@ async fn route(req: Request) -> Result<Resp> {
         (&Method::GET, ["api", "articles"]) => list_articles(&query).await,
         (&Method::POST, ["api", "articles", "read-all"]) => mark_all_read().await,
         (&Method::POST, ["api", "articles", id, "read"]) => mark_read(id).await,
+        (&Method::POST, ["api", "articles", id, "favorite"]) => mark_favorite(id).await,
+        (&Method::DELETE, ["api", "articles", id, "favorite"]) => unmark_favorite(id).await,
         (&Method::POST, ["api", "import", "opml"]) => import_opml(req).await,
         (&Method::GET, ["api", "stats"]) => get_stats().await,
         _ => Ok(error_response(StatusCode::NOT_FOUND, "not found")),
@@ -111,7 +113,8 @@ const FEED_SELECT: &str = "SELECT id::text, url, title, site_url, etag, last_mod
 
 const ARTICLE_SELECT: &str = "SELECT a.id::text, a.feed_id::text, a.url, a.title, a.content, a.author, \
      EXTRACT(EPOCH FROM a.published_at)::bigint, \
-     EXTRACT(EPOCH FROM a.fetched_at)::bigint, a.image_url \
+     EXTRACT(EPOCH FROM a.fetched_at)::bigint, a.image_url, \
+     (f.article_id IS NOT NULL) AS is_favorite \
      FROM articles a";
 
 fn row_to_feed(row: &Row) -> Result<Feed> {
@@ -129,6 +132,7 @@ fn row_to_article(row: &Row) -> Result<Article> {
         published_at: Option::<i64>::decode(&row[6])?,
         fetched_at: Option::<i64>::decode(&row[7])?,
         image_url: Option::<String>::decode(&row[8])?,
+        is_favorite: bool::decode(&row[9]).unwrap_or(false),
     })
 }
 
@@ -239,48 +243,55 @@ async fn delete_feed(id: &str) -> Result<Resp> {
     }
 }
 
+struct ArticleListFilter {
+    feed_id: Option<String>,
+    unread: bool,
+    favorite: bool,
+}
+
+fn article_list_query(filter: &ArticleListFilter) -> (String, Vec<ParameterValue>) {
+    let mut joins = String::new();
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<ParameterValue> = Vec::new();
+
+    joins.push_str(" LEFT JOIN favorites f ON a.id = f.article_id");
+    if filter.unread {
+        joins.push_str(" LEFT JOIN read_status rs ON a.id = rs.article_id");
+        conditions.push("rs.article_id IS NULL".to_owned());
+    }
+    if filter.favorite {
+        conditions.push("f.article_id IS NOT NULL".to_owned());
+    }
+    if let Some(feed_id) = &filter.feed_id {
+        params.push(ParameterValue::Uuid(feed_id.clone()));
+        conditions.push(format!("a.feed_id = ${}", params.len()));
+    }
+
+    let mut sql = format!("{ARTICLE_SELECT}{joins}");
+    if !conditions.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" AND "));
+    }
+    sql.push_str(" ORDER BY a.published_at DESC NULLS LAST");
+    (sql, params)
+}
+
 async fn list_articles(query: &str) -> Result<Resp> {
     let params_map = parse_query(query);
-    let feed_id = params_map.get("feed_id").cloned();
-    let unread = params_map
-        .get("unread")
-        .map(|s| s == "true")
-        .unwrap_or(false);
+    let filter = ArticleListFilter {
+        feed_id: params_map.get("feed_id").cloned(),
+        unread: params_map
+            .get("unread")
+            .map(|s| s == "true")
+            .unwrap_or(false),
+        favorite: params_map
+            .get("favorite")
+            .map(|s| s == "true")
+            .unwrap_or(false),
+    };
 
     let conn = db::connect().await?;
-
-    let (sql, query_params): (String, Vec<ParameterValue>) = match (feed_id, unread) {
-        (Some(fid), true) => (
-            format!(
-                "{ARTICLE_SELECT} \
-                 LEFT JOIN read_status rs ON a.id = rs.article_id \
-                 WHERE a.feed_id = $1 AND rs.article_id IS NULL \
-                 ORDER BY a.published_at DESC NULLS LAST"
-            ),
-            vec![ParameterValue::Uuid(fid)],
-        ),
-        (Some(fid), false) => (
-            format!(
-                "{ARTICLE_SELECT} \
-                 WHERE a.feed_id = $1 \
-                 ORDER BY a.published_at DESC NULLS LAST"
-            ),
-            vec![ParameterValue::Uuid(fid)],
-        ),
-        (None, true) => (
-            format!(
-                "{ARTICLE_SELECT} \
-                 LEFT JOIN read_status rs ON a.id = rs.article_id \
-                 WHERE rs.article_id IS NULL \
-                 ORDER BY a.published_at DESC NULLS LAST"
-            ),
-            vec![],
-        ),
-        (None, false) => (
-            format!("{ARTICLE_SELECT} ORDER BY a.published_at DESC NULLS LAST"),
-            vec![],
-        ),
-    };
+    let (sql, query_params) = article_list_query(&filter);
 
     let rows = conn.query(sql, query_params).await?.collect().await?;
     let articles: Vec<Article> = rows.iter().map(row_to_article).collect::<Result<_>>()?;
@@ -296,6 +307,78 @@ async fn mark_read(id: &str) -> Result<Resp> {
     .await?;
 
     Ok(empty(StatusCode::NO_CONTENT))
+}
+
+async fn mark_favorite(id: &str) -> Result<Resp> {
+    let conn = db::connect().await?;
+    if !uuid_shape_ok(id) {
+        return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+    }
+    conn.execute(
+        "INSERT INTO favorites (article_id) \
+         SELECT $1::text::uuid WHERE EXISTS (SELECT 1 FROM articles WHERE id = $1::text::uuid) \
+         ON CONFLICT DO NOTHING",
+        vec![ParameterValue::Str(id.to_owned())],
+    )
+    .await?;
+
+    if article_exists(&conn, id).await? {
+        Ok(empty(StatusCode::NO_CONTENT))
+    } else {
+        Ok(error_response(StatusCode::NOT_FOUND, "article not found"))
+    }
+}
+
+async fn unmark_favorite(id: &str) -> Result<Resp> {
+    let conn = db::connect().await?;
+    if !uuid_shape_ok(id) {
+        return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+    }
+    conn.execute(
+        "DELETE FROM favorites WHERE article_id = $1::text::uuid",
+        vec![ParameterValue::Str(id.to_owned())],
+    )
+    .await?;
+
+    if article_exists(&conn, id).await? {
+        Ok(empty(StatusCode::NO_CONTENT))
+    } else {
+        Ok(error_response(StatusCode::NOT_FOUND, "article not found"))
+    }
+}
+
+fn uuid_shape_ok(id: &str) -> bool {
+    let segments = [8usize, 4, 4, 4, 12];
+    let mut rest = id;
+    for (i, len) in segments.iter().enumerate() {
+        if rest.len() < *len {
+            return false;
+        }
+        let (head, tail) = rest.split_at(*len);
+        if !head.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return false;
+        }
+        rest = tail;
+        if i < 4 {
+            if !rest.starts_with('-') {
+                return false;
+            }
+            rest = &rest[1..];
+        }
+    }
+    rest.is_empty()
+}
+
+async fn article_exists(conn: &spin_sdk::pg::Connection, id: &str) -> Result<bool> {
+    let rows = conn
+        .query(
+            "SELECT 1 FROM articles WHERE id = $1::text::uuid",
+            vec![ParameterValue::Str(id.to_owned())],
+        )
+        .await?
+        .collect()
+        .await?;
+    Ok(!rows.is_empty())
 }
 
 async fn mark_all_read() -> Result<Resp> {
@@ -554,6 +637,50 @@ mod tests {
             spin_sdk::http::StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_ne!(resp.status(), spin_sdk::http::StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn article_list_query_covers_feed_unread_and_favorite_combinations() {
+        use super::{ArticleListFilter, article_list_query};
+        for (feed, unread, favorite, want_where) in [
+            (false, false, false, 0usize),
+            (false, true, false, 1),
+            (false, false, true, 1),
+            (true, true, true, 3),
+        ] {
+            let filter = ArticleListFilter {
+                feed_id: feed.then(|| "00000000-0000-0000-0000-000000000000".to_owned()),
+                unread,
+                favorite,
+            };
+            let (sql, params) = article_list_query(&filter);
+            assert_eq!(
+                sql.matches("WHERE").count(),
+                usize::from(want_where > 0),
+                "{sql}"
+            );
+            assert_eq!(
+                sql.matches("AND").count(),
+                want_where.saturating_sub(1),
+                "{sql}"
+            );
+            assert!(sql.contains("LEFT JOIN favorites f"), "{sql}");
+            assert_eq!(params.len(), usize::from(feed), "{sql}");
+            if favorite {
+                assert!(sql.contains("f.article_id IS NOT NULL"), "{sql}");
+            }
+            if unread {
+                assert!(sql.contains("rs.article_id IS NULL"), "{sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn uuid_shape_rejects_malformed_ids() {
+        assert!(super::uuid_shape_ok("00000000-0000-0000-0000-000000000000"));
+        for bad in ["", "not-a-uuid", "00000000-0000-0000-0000-00000000000g"] {
+            assert!(!super::uuid_shape_ok(bad), "{bad}");
+        }
     }
 
     #[test]

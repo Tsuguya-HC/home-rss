@@ -38,10 +38,18 @@ pub struct Article {
     pub published_at: Option<i64>,
     pub fetched_at: Option<i64>,
     pub image_url: Option<String>,
+    #[serde(default)]
+    pub is_favorite: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReadStatus {
     pub article_id: String,
     pub read_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Favorite {
+    pub article_id: String,
+    pub created_at: Option<i64>,
 }

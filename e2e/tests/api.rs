@@ -81,6 +81,15 @@ async fn delete(path: &str) -> u16 {
     reqwest::Client::new().delete(server(path)).send().await.expect("DELETE").status().as_u16()
 }
 
+async fn run_cleaner() {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/clean", env("E2E_CLEANER_URL")))
+        .send()
+        .await
+        .expect("POST /clean");
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
 fn titles(articles: &Value) -> Vec<&str> {
     let mut titles: Vec<&str> = articles
         .as_array()
@@ -184,6 +193,119 @@ async fn adding_a_feed_rejects_urls_the_fetcher_must_not_reach() {
         assert_eq!(post("/api/feeds", Some(body)).await, 400, "{body}");
     }
     assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
+}
+
+#[tokio::test]
+async fn marking_favorite_is_idempotent_both_ways() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "one", 1).await;
+
+    assert_eq!(post(&format!("/api/articles/{article}/favorite"), None).await, 204);
+    assert_eq!(post(&format!("/api/articles/{article}/favorite"), None).await, 204);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 1);
+
+    assert_eq!(delete(&format!("/api/articles/{article}/favorite")).await, 204);
+    assert_eq!(delete(&format!("/api/articles/{article}/favorite")).await, 204);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 0);
+}
+
+#[tokio::test]
+async fn favorite_filter_combines_with_feed_and_unread() {
+    let db = fresh_db().await;
+    let a = seed_feed(&db, "https://a.example/feed").await;
+    let b = seed_feed(&db, "https://b.example/feed").await;
+    let a_fav_read = seed_article(&db, &a, "a-fav-read", 1).await;
+    seed_article(&db, &a, "a-fav-unread", 1).await;
+    let b_fav_unread = seed_article(&db, &b, "b-fav-unread", 1).await;
+    seed_article(&db, &b, "b-plain-unread", 1).await;
+    mark_read_in_db(&db, &a_fav_read).await;
+    for id in [
+        a_fav_read.clone(),
+        db.query_one("SELECT id::text FROM articles WHERE title = 'a-fav-unread'", &[])
+            .await
+            .expect("a-fav-unread")
+            .get::<_, String>(0),
+        b_fav_unread.clone(),
+    ] {
+        assert_eq!(post(&format!("/api/articles/{id}/favorite"), None).await, 204);
+    }
+
+    let (_, favs) = get_json("/api/articles?favorite=true").await;
+    assert_eq!(titles(&favs), ["a-fav-read", "a-fav-unread", "b-fav-unread"]);
+
+    let (_, favs_of_a) = get_json(&format!("/api/articles?feed_id={a}&favorite=true")).await;
+    assert_eq!(titles(&favs_of_a), ["a-fav-read", "a-fav-unread"]);
+
+    let (_, unread_favs) = get_json("/api/articles?unread=true&favorite=true").await;
+    assert_eq!(titles(&unread_favs), ["a-fav-unread", "b-fav-unread"]);
+
+    let (_, unread_favs_of_b) =
+        get_json(&format!("/api/articles?feed_id={b}&unread=true&favorite=true")).await;
+    assert_eq!(titles(&unread_favs_of_b), ["b-fav-unread"]);
+}
+
+#[tokio::test]
+async fn favorite_of_missing_article_returns_not_found() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "one", 1).await;
+    // 未実装の経路ではここも 404 になる（Spin の未ルート応答）。実装後は
+    // 204 になり、次の存在しない記事への操作が 500 ではなく 404 であることを
+    // コンポーネントの応答として検証する。
+    assert_eq!(post(&format!("/api/articles/{article}/favorite"), None).await, 204);
+    let missing = "00000000-0000-0000-0000-000000000000";
+    assert_eq!(post(&format!("/api/articles/{missing}/favorite"), None).await, 404);
+    assert_eq!(delete(&format!("/api/articles/{missing}/favorite")).await, 404);
+}
+
+#[tokio::test]
+async fn cleaner_keeps_favorites_past_retention() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let old_fav_read = seed_article(&db, &feed, "old-fav-read", 15).await;
+    let old_fav_unread = seed_article(&db, &feed, "old-fav-unread", 15).await;
+    let old_read = seed_article(&db, &feed, "old-read", 15).await;
+    mark_read_in_db(&db, &old_fav_read).await;
+    mark_read_in_db(&db, &old_read).await;
+    assert_eq!(post(&format!("/api/articles/{old_fav_read}/favorite"), None).await, 204);
+    assert_eq!(post(&format!("/api/articles/{old_fav_unread}/favorite"), None).await, 204);
+
+    run_cleaner().await;
+
+    let (_, left) = get_json("/api/articles").await;
+    assert_eq!(titles(&left), ["old-fav-read", "old-fav-unread"]);
+}
+
+#[tokio::test]
+async fn unmarked_article_becomes_eligible_for_cleaner_again() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let old_read = seed_article(&db, &feed, "old-read", 15).await;
+    mark_read_in_db(&db, &old_read).await;
+    assert_eq!(post(&format!("/api/articles/{old_read}/favorite"), None).await, 204);
+
+    run_cleaner().await;
+    let (_, left) = get_json("/api/articles").await;
+    assert_eq!(titles(&left), ["old-read"]);
+
+    assert_eq!(delete(&format!("/api/articles/{old_read}/favorite")).await, 204);
+    run_cleaner().await;
+
+    let (_, left) = get_json("/api/articles").await;
+    assert_eq!(titles(&left), Vec::<&str>::new());
+}
+
+#[tokio::test]
+async fn deleting_a_feed_removes_favorites_with_its_articles() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "one", 1).await;
+    assert_eq!(post(&format!("/api/articles/{article}/favorite"), None).await, 204);
+
+    assert_eq!(delete(&format!("/api/feeds/{feed}")).await, 204);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 0);
 }
 
 #[tokio::test]

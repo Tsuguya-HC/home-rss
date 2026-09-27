@@ -31,7 +31,9 @@ async fn run() -> Result<String> {
              WHERE id IN ( \
                SELECT a.id FROM articles a \
                JOIN read_status rs ON a.id = rs.article_id \
+               LEFT JOIN favorites f ON a.id = f.article_id \
                WHERE a.fetched_at < NOW() - $1::text::interval \
+               AND f.article_id IS NULL \
              )",
             vec![ParameterValue::Str(format!("{retention_days} days"))],
         )
