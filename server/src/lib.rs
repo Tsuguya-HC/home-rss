@@ -302,21 +302,60 @@ async fn article_exists(conn: &spin_sdk::pg::Connection, id: &str) -> Result<boo
         .is_some())
 }
 
+// uuid クレートを増やさず 8-4-4-4-12 の hex だけ見る。ParameterValue::Uuid に
+// 不正な形を渡すと BadParameter/ValueConversionFailed になり catch-all の
+// 500 に落ちるので、DB に触る前に弾く。
+fn article_id_is_uuid_shaped(id: &str) -> bool {
+    let mut segments = id.split('-');
+    for len in [8, 4, 4, 4, 12] {
+        match segments.next() {
+            Some(s) if s.len() == len && s.bytes().all(|b| b.is_ascii_hexdigit()) => {}
+            _ => return false,
+        }
+    }
+    segments.next().is_none()
+}
+
+fn is_foreign_key_violation(e: &spin_sdk::pg::Error) -> bool {
+    // article_exists と INSERT の間に DELETE /api/feeds/{id} が割り込むと
+    // favorites.article_id の外部キー (23503) で失敗する。存在確認をすり抜けた
+    // 「既に無い記事」なので 404 に落とす。
+    matches!(
+        e,
+        spin_sdk::pg::Error::PgError(spin_sdk::pg::PgError::QueryFailed(
+            spin_sdk::pg::QueryError::DbError(db)
+        )) if db.code == "23503"
+    )
+}
+
 async fn mark_favorite(id: &str) -> Result<Resp> {
+    if !article_id_is_uuid_shaped(id) {
+        return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+    }
     let conn = db::connect().await?;
     if !article_exists(&conn, id).await? {
         return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
     }
-    conn.execute(
-        "INSERT INTO favorites (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        vec![ParameterValue::Uuid(id.to_owned())],
-    )
-    .await?;
+    if let Err(e) = conn
+        .execute(
+            "INSERT INTO favorites (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            vec![ParameterValue::Uuid(id.to_owned())],
+        )
+        .await
+    {
+        if is_foreign_key_violation(&e) {
+            return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+        }
+        return Err(e.into());
+    }
 
     Ok(empty(StatusCode::NO_CONTENT))
 }
 
 async fn unmark_favorite(id: &str) -> Result<Resp> {
+    if !article_id_is_uuid_shaped(id) {
+        return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+    }
     let conn = db::connect().await?;
     conn.execute(
         "DELETE FROM favorites WHERE article_id = $1",

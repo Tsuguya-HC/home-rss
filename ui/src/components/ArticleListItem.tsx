@@ -7,9 +7,10 @@ interface ArticleListItemProps {
   isSelected: boolean
   onClick: () => void
   onToggleFavorite: () => void
+  favoritePending?: boolean
 }
 
-export function ArticleListItem({ article, isSelected, onClick, onToggleFavorite }: ArticleListItemProps) {
+export function ArticleListItem({ article, isSelected, onClick, onToggleFavorite, favoritePending }: ArticleListItemProps) {
   const date = article.published_at ? formatDate(article.published_at) : null
   const [imgHidden, setImgHidden] = useState(false)
 
@@ -34,6 +35,7 @@ export function ArticleListItem({ article, isSelected, onClick, onToggleFavorite
       <button
         className="btn-icon"
         title={article.is_favorite ? 'お気に入りを外す' : 'お気に入りにする'}
+        disabled={favoritePending}
         onClick={(e) => {
           e.stopPropagation()
           onToggleFavorite()

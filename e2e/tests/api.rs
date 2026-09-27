@@ -269,6 +269,51 @@ async fn favorites_only_filter_combines_with_feed_and_unread() {
 }
 
 #[tokio::test]
+async fn favorite_with_malformed_article_id_returns_404_not_500() {
+    // 仕分け 1: UUID として解釈できない ID でも存在確認が 500 にならないこと。
+    fresh_db().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(server("/api/articles/not-a-uuid/favorite"))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status().as_u16(), 404);
+    let body: Value = resp.json().await.expect("JSON body");
+    assert_eq!(body, serde_json::json!({"error": "article not found"}));
+
+    let resp = client
+        .delete(server("/api/articles/not-a-uuid/favorite"))
+        .send()
+        .await
+        .expect("DELETE");
+    assert_eq!(resp.status().as_u16(), 404);
+    let body: Value = resp.json().await.expect("JSON body");
+    assert_eq!(body, serde_json::json!({"error": "article not found"}));
+}
+
+#[tokio::test]
+async fn unmarking_one_favorite_keeps_other_favorites() {
+    // 仕分け 3 が捕まえる変異: unmark_favorite の DELETE から
+    // WHERE article_id = $1 を落としても既存テストは全て通る。
+    // 複数 favorite 中の 1 件だけ外して他が残ることを固定する。
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let keep = seed_article(&db, &feed, "keep", 1).await;
+    let drop = seed_article(&db, &feed, "drop", 1).await;
+    for id in [&keep, &drop] {
+        assert_eq!(post(&format!("/api/articles/{id}/favorite"), None).await, 204);
+    }
+
+    assert_eq!(delete(&format!("/api/articles/{drop}/favorite")).await, 204);
+
+    let (_, all) = get_json("/api/articles").await;
+    assert!(is_favorite(&all, "keep"));
+    assert!(!is_favorite(&all, "drop"));
+}
+
+#[tokio::test]
 async fn marking_a_missing_article_as_favorite_returns_404() {
     fresh_db().await;
     let resp = reqwest::Client::new()

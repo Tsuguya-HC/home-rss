@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Feed, Article } from './types'
 import { api } from './api'
 import { Sidebar } from './components/Sidebar'
@@ -19,6 +19,11 @@ export default function App() {
   const [mobileView, setMobileView] = useState<MobileView>('list')
   const [error, setError] = useState<string | null>(null)
   const [loadingArticles, setLoadingArticles] = useState(false)
+  // 連打中に 2 回目が古い is_favorite を見て同じ方向へ送らないよう、
+  // 応答待ちの記事 ID を覚えて重ね打ちを落とす。useState ではなく ref で
+  // 同期的に見るのは、state の再レンダーが間に合わない連打を防ぐため。
+  const favoritePending = useRef<Set<string>>(new Set())
+  const [, setFavoritePendingTick] = useState(0)
 
   const withError = async (fn: () => Promise<void>) => {
     try {
@@ -88,24 +93,41 @@ export default function App() {
       setUnreadCounts({})
     })
 
-  const handleToggleFavorite = (article: Article) =>
-    withError(async () => {
-      if (article.is_favorite) {
-        await api.unmarkFavorite(article.id)
-      } else {
-        await api.markFavorite(article.id)
-      }
-      const isFavorite = !article.is_favorite
-      setArticles((prev) => {
-        if (showFavoritesOnly && !isFavorite) {
-          return prev.filter((a) => a.id !== article.id)
+  const isFavoritePending = (id: string) => favoritePending.current.has(id)
+  const setFavoritePending = (id: string, pending: boolean) => {
+    if (pending) {
+      favoritePending.current.add(id)
+    } else {
+      favoritePending.current.delete(id)
+    }
+    setFavoritePendingTick((t) => t + 1)
+  }
+
+  const handleToggleFavorite = (article: Article) => {
+    if (favoritePending.current.has(article.id)) return Promise.resolve()
+    setFavoritePending(article.id, true)
+    return withError(async () => {
+      try {
+        if (article.is_favorite) {
+          await api.unmarkFavorite(article.id)
+        } else {
+          await api.markFavorite(article.id)
         }
-        return prev.map((a) => (a.id === article.id ? { ...a, is_favorite: isFavorite } : a))
-      })
-      setSelectedArticle((prev) =>
-        prev && prev.id === article.id ? { ...prev, is_favorite: isFavorite } : prev,
-      )
+        const isFavorite = !article.is_favorite
+        setArticles((prev) => {
+          if (showFavoritesOnly && !isFavorite) {
+            return prev.filter((a) => a.id !== article.id)
+          }
+          return prev.map((a) => (a.id === article.id ? { ...a, is_favorite: isFavorite } : a))
+        })
+        setSelectedArticle((prev) =>
+          prev && prev.id === article.id ? { ...prev, is_favorite: isFavorite } : prev,
+        )
+      } finally {
+        setFavoritePending(article.id, false)
+      }
     })
+  }
 
   const handleAddFeed = async (url: string) => {
     await withError(async () => {
@@ -232,6 +254,7 @@ export default function App() {
             }}
             onSelectArticle={handleSelectArticle}
             onToggleFavorite={handleToggleFavorite}
+            isFavoritePending={isFavoritePending}
             onMarkAllRead={handleMarkAllRead}
             onShowSidebar={() => setMobileView('sidebar')}
           />
@@ -243,6 +266,7 @@ export default function App() {
               article={selectedArticle}
               onBack={() => setMobileView('list')}
               onToggleFavorite={() => handleToggleFavorite(selectedArticle)}
+              favoritePending={isFavoritePending(selectedArticle.id)}
             />
           ) : (
             <div className="detail-placeholder">記事を選択してください</div>

@@ -11,6 +11,7 @@ interface ArticleListPanelProps {
   onToggleFavorites: () => void
   onSelectArticle: (article: Article) => void
   onToggleFavorite: (article: Article) => void
+  isFavoritePending?: (id: string) => boolean
   onMarkAllRead: () => void
   onShowSidebar: () => void
 }
@@ -25,6 +26,7 @@ export function ArticleListPanel({
   onToggleFavorites,
   onSelectArticle,
   onToggleFavorite,
+  isFavoritePending,
   onMarkAllRead,
   onShowSidebar,
 }: ArticleListPanelProps) {
@@ -70,6 +72,7 @@ export function ArticleListPanel({
               isSelected={selectedArticle?.id === article.id}
               onClick={() => onSelectArticle(article)}
               onToggleFavorite={() => onToggleFavorite(article)}
+              favoritePending={isFavoritePending?.(article.id)}
             />
           ))}
         </ul>
