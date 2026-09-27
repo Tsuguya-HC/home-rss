@@ -28,6 +28,11 @@ export default function App() {
   useEffect(() => {
     showFavoritesOnlyRef.current = showFavoritesOnly
   }, [showFavoritesOnly])
+  // 完了済みトグルの結果を覚え、一覧 GET の解決時に載せ直すための表。
+  // GET がトグル完了前のスナップショットを持って後から解決しても、
+  // 完了済みの is_favorite が巻き戻らないようにする。サーバ側の値と一致を
+  // 確認できた項目は消すので、残るのは未反映の分だけになる。
+  const favoriteOverrides = useRef(new Map<string, boolean>())
 
   const withError = async (fn: () => Promise<void>) => {
     try {
@@ -56,7 +61,39 @@ export default function App() {
     setLoadingArticles(true)
     try {
       const articles = await api.getArticles(selectedFeedId, showUnreadOnly, showFavoritesOnly)
-      setArticles(articles)
+      const overrides = favoriteOverrides.current
+      for (const a of articles) {
+        if (overrides.get(a.id) === a.is_favorite) overrides.delete(a.id)
+      }
+      // GET が完了済みトグルより前のスナップショットを持って後から解決すると、
+      // そのまま差し替えではトグル結果が巻き戻る。完了済みの分だけ載せ直す。
+      // お気に入りのみ表示の応答に載ってこない完了済み favorite は、まだ
+      // 未反映なので前回表示の行から足す。お気に入りのみ表示でなければ、
+      // 応答に載ってこない項目は消えた記事として表からも消す。
+      const favoritesOnly = showFavoritesOnlyRef.current
+      setArticles((prev) => {
+        const next = articles.map((a) => {
+          const fav = overrides.get(a.id)
+          return fav === undefined ? a : { ...a, is_favorite: fav }
+        })
+        if (favoritesOnly) {
+          const ids = new Set(next.map((a) => a.id))
+          const prevById = new Map(prev.map((a) => [a.id, a]))
+          for (const [id, fav] of overrides) {
+            if (fav && !ids.has(id)) {
+              const row = prevById.get(id)
+              if (row) next.push({ ...row, is_favorite: true })
+            }
+          }
+          return next.filter((a) => a.is_favorite)
+        }
+        return next
+      })
+      const ids = new Set(articles.map((a) => a.id))
+      for (const [id, fav] of [...overrides]) {
+        if (ids.has(id)) continue
+        if (!favoritesOnly || !fav) overrides.delete(id)
+      }
       setReadIds(new Set())
     } finally {
       setLoadingArticles(false)
@@ -118,6 +155,7 @@ export default function App() {
           await api.markFavorite(article.id)
         }
         const isFavorite = !article.is_favorite
+        favoriteOverrides.current.set(article.id, isFavorite)
         // 完了処理が走る頃には showFavoritesOnly が変わっている場合がある。
         // 呼び出し時点の値をクロージャで見ると、フィルタ OFF なのに解除した
         // 記事だけが一覧から消える。最新の値を ref 経由で見る。

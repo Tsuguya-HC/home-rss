@@ -270,7 +270,7 @@ async fn favorites_only_filter_combines_with_feed_and_unread() {
 
 #[tokio::test]
 async fn favorite_with_malformed_article_id_returns_404_not_500() {
-    // 仕分け 1: UUID として解釈できない ID でも存在確認が 500 にならないこと。
+    // "not-a-uuid" のような非 UUID の ID でも存在確認が 500 にならないこと。
     fresh_db().await;
     let client = reqwest::Client::new();
 
@@ -295,10 +295,10 @@ async fn favorite_with_malformed_article_id_returns_404_not_500() {
 
 #[tokio::test]
 async fn favorite_with_non_hex_uuid_shaped_id_returns_404_not_500() {
-    // 仕分け 1 が捕まえる変異: article_id_is_uuid_shaped から hex 判定を
-    // 外すと、長さの形だけ合った非 hex の ID がガードを通過して
-    // ParameterValue::Uuid の変換で 500 に落ちる。"not-a-uuid" では
-    // 最初のセグメント長で弾かれるため hex の有無を区別できない。
+    // 捕まえる変異: article_id_is_uuid_shaped から hex 判定を外すと、長さの
+    // 形だけ合った非 hex の ID がガードを通過して ParameterValue::Uuid の
+    // 変換で 500 に落ちる。"not-a-uuid" では最初のセグメント長で弾かれる
+    // ため hex の有無を区別できない。
     fresh_db().await;
     let client = reqwest::Client::new();
     // 長さは 8-4-4-4-12 だが 'g' は hex ではない。
@@ -324,10 +324,40 @@ async fn favorite_with_non_hex_uuid_shaped_id_returns_404_not_500() {
 }
 
 #[tokio::test]
+async fn favorite_with_trailing_segment_uuid_shaped_id_returns_404_not_500() {
+    // 末尾の余分なセグメントを無視して shaped とみなす変異
+    // (segments.next().is_none() を常に true にする) を捕まえる。
+    // 5 セグメントの長さと hex は合っているため、他の malformed-ID テスト
+    // ("not-a-uuid"、非 hex) ではこの変異を区別できない。
+    fresh_db().await;
+    let client = reqwest::Client::new();
+    // 8-4-4-4-12 は正しいが末尾に "-x" が付く。
+    let id = "00000000-0000-0000-0000-000000000000-x";
+
+    let resp = client
+        .post(server(&format!("/api/articles/{id}/favorite")))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status().as_u16(), 404);
+    let body: Value = resp.json().await.expect("JSON body");
+    assert_eq!(body, serde_json::json!({"error": "article not found"}));
+
+    let resp = client
+        .delete(server(&format!("/api/articles/{id}/favorite")))
+        .send()
+        .await
+        .expect("DELETE");
+    assert_eq!(resp.status().as_u16(), 404);
+    let body: Value = resp.json().await.expect("JSON body");
+    assert_eq!(body, serde_json::json!({"error": "article not found"}));
+}
+
+#[tokio::test]
 async fn unmarking_one_favorite_keeps_other_favorites() {
-    // 仕分け 3 が捕まえる変異: unmark_favorite の DELETE から
-    // WHERE article_id = $1 を落としても既存テストは全て通る。
-    // 複数 favorite 中の 1 件だけ外して他が残ることを固定する。
+    // 捕まえる変異: unmark_favorite の DELETE から WHERE article_id = $1 を
+    // 落とすと、解除が全 favorite に及ぶ。複数 favorite 中の 1 件だけ外して
+    // 他が残ることを固定する。
     let db = fresh_db().await;
     let feed = seed_feed(&db, "https://a.example/feed").await;
     let keep = seed_article(&db, &feed, "keep", 1).await;
