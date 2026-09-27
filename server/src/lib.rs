@@ -313,21 +313,35 @@ async fn article_exists(conn: &spin_sdk::pg::Connection, id: &str) -> Result<boo
 
 async fn mark_favorite(id: &str) -> Result<Resp> {
     let conn = db::connect().await?;
-    // 存在確認を先に行うと、その直後に親フィードが消された場合に
-    // INSERT が FK 違反で 500 になる。記事が現存するときだけ行を作る
-    // 1 文にまとめ、書き込めなかった側を存在確認で切り分ける。
-    let rows = conn
-        .execute(
-            "INSERT INTO favorites (article_id) SELECT $1 WHERE EXISTS \
-             (SELECT 1 FROM articles WHERE id = $1) ON CONFLICT DO NOTHING",
-            vec![ParameterValue::Uuid(id.to_owned())],
-        )
-        .await?;
-    if rows == 0 && !article_exists(&conn, id).await? {
+    let rows = conn.execute(MARK_FAVORITE_SQL, vec![ParameterValue::Uuid(id.to_owned())]).await?;
+    if mark_favorite_status(rows, article_exists(&conn, id).await?) == MarkFavoriteStatus::Missing {
         return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
     }
 
     Ok(empty(StatusCode::NO_CONTENT))
+}
+
+/// 記事が現存するときだけ行を作る 1 文。存在確認を先に行うと、その直後に
+/// 親フィードが消された場合に INSERT が FK 違反で 500 になるため、INSERT 自体に
+/// 存在条件を埋め込み、書き込めなかった側を存在確認で切り分ける。
+const MARK_FAVORITE_SQL: &str = "INSERT INTO favorites (article_id) SELECT $1 WHERE EXISTS \
+     (SELECT 1 FROM articles WHERE id = $1) ON CONFLICT DO NOTHING";
+
+#[derive(Debug, PartialEq, Eq)]
+enum MarkFavoriteStatus {
+    Stored,
+    Missing,
+}
+
+/// INSERT の結果 (rows) と追随の存在確認 (exists) から応答を決める。rows > 0 は
+/// 冪等な再マーク（既存行への再送）も含む。rows == 0 かつ記事が消えていれば
+/// 404、そうでなければ記事はあるので 204。
+fn mark_favorite_status(rows: u64, exists: bool) -> MarkFavoriteStatus {
+    if rows == 0 && !exists {
+        MarkFavoriteStatus::Missing
+    } else {
+        MarkFavoriteStatus::Stored
+    }
 }
 
 async fn unmark_favorite(id: &str) -> Result<Resp> {
@@ -478,7 +492,7 @@ async fn get_stats() -> Result<Resp> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_article_list_query, parse_opml};
+    use super::{build_article_list_query, mark_favorite_status, parse_opml, MARK_FAVORITE_SQL};
 
     #[test]
     fn article_list_query_combines_feed_unread_and_favorite_without_branching() {
@@ -501,6 +515,28 @@ mod tests {
         let (fav_only, _) = build_article_list_query(None, false, true);
         assert!(fav_only.contains("favf"));
         assert!(!fav_only.contains("read_status"));
+    }
+
+    #[test]
+    fn mark_favorite_write_is_guarded_by_existence_in_a_single_statement() {
+        // INSERT 自体に記事の存在条件を埋め込む。WHERE EXISTS を外すと
+        // 存在確認と書き込みの競合で FK 違反が 500 になる (#152)。
+        assert!(MARK_FAVORITE_SQL.contains("WHERE EXISTS"));
+        assert!(MARK_FAVORITE_SQL.contains("FROM articles"));
+    }
+
+    #[test]
+    fn missing_article_maps_to_not_found_while_existing_maps_to_no_content() {
+        use super::MarkFavoriteStatus;
+        // rows == 0 かつ記事なし → 404。!exists を外すと通常の冪等な再マーク
+        // (rows == 0 だが記事はある) まで 404 になる。
+        assert_eq!(mark_favorite_status(0, false), MarkFavoriteStatus::Missing);
+        // rows == 0 だが記事がある → 204。rows == 0 だけを見て 404 にすると
+        // 冪等な再マークが 404 になる。
+        assert_eq!(mark_favorite_status(0, true), MarkFavoriteStatus::Stored);
+        // rows > 0 → 204。存在確認の結果に関わらず書き込めれば成功。
+        assert_eq!(mark_favorite_status(1, false), MarkFavoriteStatus::Stored);
+        assert_eq!(mark_favorite_status(1, true), MarkFavoriteStatus::Stored);
     }
 
     #[test]

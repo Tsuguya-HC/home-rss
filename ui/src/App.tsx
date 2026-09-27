@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Feed, Article } from './types'
 import { api } from './api'
+import { isArticleVisible } from './lib/articleFilter'
+import { beginFavoriteToggle, endFavoriteToggle } from './lib/favoriteToggle'
 import { Sidebar } from './components/Sidebar'
 import { ArticleListPanel } from './components/ArticleListPanel'
 import { ArticleDetail } from './components/ArticleDetail'
@@ -86,18 +88,15 @@ export default function App() {
     })
   }
 
-  // 送信中の記事 ID。応答が返るまでその記事の星ボタンを無効化し、
-  // トグルの連打による POST/DELETE の逆順確定を起こさない。
-  // state の更新は次の render まで反映されないため、同 tick の連打を
-  // 確実に弾くガードは ref、ボタンの無効化表示は state が担う。
+  // 送信中の記事 ID。state の更新は次の render まで反映されないため、
+  // 同 tick の連打を弾く判定は ref が担い、ボタンの無効化表示は state が担う。
   const favoriteInFlight = useRef<Set<string>>(new Set())
   const [favoritePending, setFavoritePending] = useState<Set<string>>(new Set())
 
   const handleToggleFavorite = (article: Article) => {
-    if (favoriteInFlight.current.has(article.id)) return
+    if (!beginFavoriteToggle(favoriteInFlight.current, article.id)) return
     return withError(async () => {
       const next = !article.favorite
-      favoriteInFlight.current.add(article.id)
       setFavoritePending((prev) => new Set([...prev, article.id]))
       applyFavorite(article.id, next)
       try {
@@ -110,7 +109,7 @@ export default function App() {
         applyFavorite(article.id, article.favorite)
         throw e
       } finally {
-        favoriteInFlight.current.delete(article.id)
+        endFavoriteToggle(favoriteInFlight.current, article.id)
         setFavoritePending((prev) => {
           const nextSet = new Set(prev)
           nextSet.delete(article.id)
@@ -210,9 +209,8 @@ export default function App() {
     })
   }
 
-  const visibleArticles = articles.filter(
-    (a) =>
-      (!showUnreadOnly || !readIds.has(a.id)) && (!showFavoritesOnly || a.favorite),
+  const visibleArticles = articles.filter((a) =>
+    isArticleVisible(a, showUnreadOnly, readIds, showFavoritesOnly),
   )
 
   const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0)
