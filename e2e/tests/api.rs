@@ -20,7 +20,7 @@ async fn fresh_db() -> Client {
         conn.await.expect("e2e database connection");
     });
     client
-        .batch_execute("TRUNCATE feeds, articles, read_status CASCADE")
+        .batch_execute("TRUNCATE feeds, articles, read_status, favorites CASCADE")
         .await
         .expect("reset tables");
     client
@@ -79,6 +79,30 @@ async fn post(path: &str, body: Option<&str>) -> u16 {
 
 async fn delete(path: &str) -> u16 {
     reqwest::Client::new().delete(server(path)).send().await.expect("DELETE").status().as_u16()
+}
+
+async fn run_cleaner() -> u16 {
+    reqwest::Client::new()
+        .post(format!("{}/clean", env("E2E_CLEANER_URL")))
+        .send()
+        .await
+        .expect("POST /clean")
+        .status()
+        .as_u16()
+}
+
+// Contract under test (#152): POST marks, DELETE unmarks, both idempotent.
+// Any 2xx other than 204, or a state-changing second call, fails these tests.
+async fn mark_favorite(article_id: &str) -> u16 {
+    post(&format!("/api/articles/{article_id}/favorite"), None).await
+}
+
+async fn unmark_favorite(article_id: &str) -> u16 {
+    delete(&format!("/api/articles/{article_id}/favorite")).await
+}
+
+fn is_favorite(article: &Value) -> bool {
+    article["is_favorite"].as_bool().expect("article has is_favorite")
 }
 
 fn titles(articles: &Value) -> Vec<&str> {
@@ -198,13 +222,120 @@ async fn cleaner_deletes_only_read_articles_past_retention() {
     mark_read_in_db(&db, &old_read).await;
     mark_read_in_db(&db, &recent_read).await;
 
-    let resp = reqwest::Client::new()
-        .post(format!("{}/clean", env("E2E_CLEANER_URL")))
-        .send()
-        .await
-        .expect("POST /clean");
-    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(run_cleaner().await, 200);
 
     let (_, left) = get_json("/api/articles").await;
     assert_eq!(titles(&left), ["old-unread", "recent-read"]);
+}
+
+// POST marks and DELETE unmarks; repeating either way keeps one favorite row.
+#[tokio::test]
+async fn marking_and_unmarking_favorite_is_idempotent_both_ways() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "one", 1).await;
+
+    assert_eq!(mark_favorite(&article).await, 204);
+    assert_eq!(mark_favorite(&article).await, 204);
+    let (_, listed) = get_json("/api/articles").await;
+    let row = listed.as_array().expect("array of articles").iter().find(|a| a["id"] == article.as_str()).expect("marked article is listed");
+    assert!(is_favorite(row), "marked article reports is_favorite=true");
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 1);
+
+    assert_eq!(unmark_favorite(&article).await, 204);
+    assert_eq!(unmark_favorite(&article).await, 204);
+    let (_, relisted) = get_json("/api/articles").await;
+    let row = relisted.as_array().expect("array of articles").iter().find(|a| a["id"] == article.as_str()).expect("unmarked article is listed");
+    assert!(!is_favorite(row), "unmarked article reports is_favorite=false");
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 0);
+}
+
+// The favorites-only filter combines with feed and unread without multiplying
+// branches: feed x unread x favorites must all narrow the same list.
+#[tokio::test]
+async fn favorites_only_filter_combines_with_feed_and_unread() {
+    let db = fresh_db().await;
+    let a = seed_feed(&db, "https://a.example/feed").await;
+    let b = seed_feed(&db, "https://b.example/feed").await;
+    let a_fav_read = seed_article(&db, &a, "a-fav-read", 1).await;
+    seed_article(&db, &a, "a-fav-unread", 1).await;
+    seed_article(&db, &b, "b-fav-unread", 1).await;
+    seed_article(&db, &a, "a-plain-unread", 1).await;
+    mark_favorite(&a_fav_read).await;
+    let (_, all) = get_json("/api/articles").await;
+    let favs: Vec<&str> = all.as_array().expect("array of articles").iter().filter(|a| is_favorite(a)).map(|a| a["title"].as_str().expect("title")).collect();
+    assert_eq!(favs.len(), 1, "exactly the marked article is flagged");
+    mark_read_in_db(&db, &a_fav_read).await;
+
+    // Mark the remaining favorites after seeding read state so the read/favorite
+    // matrix below is deterministic.
+    for title in ["a-fav-unread", "b-fav-unread"] {
+        let (_, articles) = get_json("/api/articles").await;
+        let id = articles.as_array().expect("array of articles").iter().find(|a| a["title"] == title).expect("seeded article").get("id").expect("id").as_str().expect("id str").to_owned();
+        assert_eq!(mark_favorite(&id).await, 204, "{title}");
+    }
+
+    let (_, favs_only) = get_json("/api/articles?favorites_only=true").await;
+    assert_eq!(titles(&favs_only), ["a-fav-read", "a-fav-unread", "b-fav-unread"]);
+
+    let (_, favs_of_a) = get_json(&format!("/api/articles?feed_id={a}&favorites_only=true")).await;
+    assert_eq!(titles(&favs_of_a), ["a-fav-read", "a-fav-unread"]);
+
+    let (_, unread_favs) = get_json("/api/articles?unread=true&favorites_only=true").await;
+    assert_eq!(titles(&unread_favs), ["a-fav-unread", "b-fav-unread"]);
+
+    let (_, unread_favs_of_a) = get_json(&format!("/api/articles?feed_id={a}&unread=true&favorites_only=true")).await;
+    assert_eq!(titles(&unread_favs_of_a), ["a-fav-unread"]);
+}
+
+// Marking a missing article is 404, not 500, on both the mark and unmark
+// paths; a real mark next to it proves the route itself works.
+#[tokio::test]
+async fn marking_a_missing_article_returns_not_found() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let real = seed_article(&db, &feed, "real", 1).await;
+    let missing = "00000000-0000-0000-0000-000000000000";
+
+    assert_eq!(mark_favorite(missing).await, 404);
+    assert_eq!(unmark_favorite(missing).await, 404);
+    assert_eq!(mark_favorite(&real).await, 204);
+    assert_eq!(unmark_favorite(&real).await, 204);
+}
+
+// Deleting a feed is explicit, so it removes favorites too (no orphan rows).
+#[tokio::test]
+async fn deleting_a_feed_removes_favorited_articles() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "fav", 1).await;
+    assert_eq!(mark_favorite(&article).await, 204);
+
+    assert_eq!(delete(&format!("/api/feeds/{feed}")).await, 204);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 0);
+}
+
+// A favorite survives the cleaner whether read or not; unmarking makes it
+// eligible again on the next run.
+#[tokio::test]
+async fn cleaner_keeps_favorites_until_unmarked() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let fav_read = seed_article(&db, &feed, "fav-read", 15).await;
+    let fav_unread = seed_article(&db, &feed, "fav-unread", 15).await;
+    assert_eq!(mark_favorite(&fav_read).await, 204);
+    assert_eq!(mark_favorite(&fav_unread).await, 204);
+    mark_read_in_db(&db, &fav_read).await;
+
+    assert_eq!(run_cleaner().await, 200);
+    let (_, left) = get_json("/api/articles").await;
+    assert_eq!(titles(&left), ["fav-read", "fav-unread"]);
+
+    assert_eq!(unmark_favorite(&fav_read).await, 204);
+    assert_eq!(run_cleaner().await, 200);
+    let (_, after_unmark) = get_json("/api/articles").await;
+    // fav-unread stays: it is still a favorite, and unread articles are never
+    // eligible. fav-read goes: unmarked, read, and past retention.
+    assert_eq!(titles(&after_unmark), ["fav-unread"]);
 }
