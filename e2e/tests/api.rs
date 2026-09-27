@@ -316,6 +316,91 @@ async fn deleting_a_feed_removes_favorited_articles() {
     assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 0);
 }
 
+// A favorite mark that races a concurrent delete answers 404, not 500. The
+// delete stays uncommitted (holding the row lock) until the server's INSERT is
+// observed running, so the commit always lands between the existence check and
+// the INSERT: the interleaving is deterministic, not timing-based. Catches a
+// mark_favorite that lets the foreign-key violation escape as 500.
+#[tokio::test]
+async fn marking_favorite_while_article_is_deleted_returns_not_found() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "one", 1).await;
+
+    // A second connection holds an uncommitted DELETE: the server still sees
+    // the article in its existence check, while its INSERT into favorites
+    // blocks on the foreign-key check until this transaction commits.
+    let (mut deleter, deleter_conn) =
+        tokio_postgres::connect(&env("E2E_DATABASE_URL"), NoTls)
+            .await
+            .expect("second e2e database connection");
+    tokio::spawn(async move {
+        deleter_conn.await.expect("deleter connection");
+    });
+    let tx = deleter.transaction().await.expect("begin");
+    tx.execute("DELETE FROM articles WHERE id = $1::text::uuid", &[&article])
+        .await
+        .expect("uncommitted delete");
+
+    let pending = tokio::spawn(async move { mark_favorite(&article).await });
+
+    // Wait until the server's INSERT is running (the existence check has
+    // passed by then). The polling query itself mentions favorites, so the
+    // poller must exclude its own backend or it observes itself.
+    let start = std::time::Instant::now();
+    let mut observed = false;
+    while start.elapsed() < std::time::Duration::from_secs(15) {
+        let running: i64 = db
+            .query_one(
+                "SELECT COUNT(*) FROM pg_stat_activity \
+                 WHERE state = 'active' AND pid <> pg_backend_pid() \
+                 AND query ILIKE '%favorites%'",
+                &[],
+            )
+            .await
+            .expect("pg_stat_activity")
+            .get(0);
+        if running > 0 {
+            observed = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    // Committing blind would run the delete before the existence check and go
+    // green through the sequential path, hiding the race. Fail loudly instead.
+    assert!(observed, "never observed the server's INSERT into favorites");
+    tx.commit().await.expect("commit delete");
+
+    assert_eq!(pending.await.expect("join"), 404);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
+}
+
+// Unmarking one favorite must leave the other's row alone. Catches an
+// unmark_favorite whose DELETE lost its article_id predicate and empties the
+// whole table: every other test only ever holds a single favorite row.
+#[tokio::test]
+async fn unmarking_one_favorite_keeps_the_other() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let keep = seed_article(&db, &feed, "keep", 1).await;
+    let drop_ = seed_article(&db, &feed, "drop", 1).await;
+    assert_eq!(mark_favorite(&keep).await, 204);
+    assert_eq!(mark_favorite(&drop_).await, 204);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 2);
+
+    assert_eq!(unmark_favorite(&drop_).await, 204);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 1);
+
+    let (_, listed) = get_json("/api/articles").await;
+    let row = listed
+        .as_array()
+        .expect("array of articles")
+        .iter()
+        .find(|a| a["title"] == "keep")
+        .expect("kept article is listed");
+    assert!(is_favorite(row), "the other article is still a favorite");
+}
+
 // A favorite survives the cleaner whether read or not; unmarking makes it
 // eligible again on the next run.
 #[tokio::test]

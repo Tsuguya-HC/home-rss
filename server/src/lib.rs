@@ -300,11 +300,21 @@ async fn mark_favorite(id: &str) -> Result<Resp> {
     if !article_exists(&conn, id).await? {
         return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
     }
-    conn.execute(
-        "INSERT INTO favorites (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        vec![ParameterValue::Uuid(id.to_owned())],
-    )
-    .await?;
+    // 存在確認と INSERT の間に記事が消えると外部キー違反になる。確認後に消えた
+    // のか他の失敗なのか呼び出し側では区別できないので、失敗したら存在を問い直し、
+    // 消えていれば 404 を返す。
+    if let Err(e) = conn
+        .execute(
+            "INSERT INTO favorites (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            vec![ParameterValue::Uuid(id.to_owned())],
+        )
+        .await
+    {
+        if !article_exists(&conn, id).await? {
+            return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+        }
+        return Err(e.into());
+    }
 
     Ok(empty(StatusCode::NO_CONTENT))
 }

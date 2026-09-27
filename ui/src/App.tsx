@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Feed, Article } from './types'
 import { api } from './api'
 import { Sidebar } from './components/Sidebar'
@@ -16,6 +16,7 @@ export default function App() {
   const [showUnreadOnly, setShowUnreadOnly] = useState(true)
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
   const [readIds, setReadIds] = useState<Set<string>>(new Set())
+  const favoriteOverrides = useRef(new Map<string, boolean>())
   const [mobileView, setMobileView] = useState<MobileView>('list')
   const [error, setError] = useState<string | null>(null)
   const [loadingArticles, setLoadingArticles] = useState(false)
@@ -90,14 +91,35 @@ export default function App() {
 
   const handleToggleFavorite = (article: Article) =>
     withError(async () => {
-      if (article.is_favorite) {
-        await api.unmarkFavorite(article.id)
-      } else {
-        await api.markFavorite(article.id)
-      }
-      const next = !article.is_favorite
+      // 直前のトグルが応答待ちの間の連打は、まだ state に反映されていない
+      // 旧い article を見る 2 回目が同じ操作を再送してしまう。応答を待たずに
+      // 反映した楽観値を分岐に使うことで、2 回目は逆操作になる。
+      const current = favoriteOverrides.current.get(article.id) ?? article.is_favorite
+      const next = !current
+      favoriteOverrides.current.set(article.id, next)
       setArticles((prev) => prev.map((a) => (a.id === article.id ? { ...a, is_favorite: next } : a)))
       setSelectedArticle((prev) => (prev?.id === article.id ? { ...prev, is_favorite: next } : prev))
+      try {
+        if (current) {
+          await api.unmarkFavorite(article.id)
+        } else {
+          await api.markFavorite(article.id)
+        }
+        if (favoriteOverrides.current.get(article.id) === next) {
+          favoriteOverrides.current.delete(article.id)
+        }
+      } catch (e) {
+        // 失敗時はこのトグル前の表示に戻す。連打中の別トグルが既に楽観値を
+        // 進めている場合は、その最新値を起点に戻す。
+        const latest = favoriteOverrides.current.get(article.id)
+        const rollback = latest === next ? current : !next
+        favoriteOverrides.current.set(article.id, rollback)
+        setArticles((prev) => prev.map((a) => (a.id === article.id ? { ...a, is_favorite: rollback } : a)))
+        setSelectedArticle((prev) =>
+          prev?.id === article.id ? { ...prev, is_favorite: rollback } : prev,
+        )
+        throw e
+      }
     })
 
   const handleAddFeed = async (url: string) => {
@@ -181,9 +203,11 @@ export default function App() {
     })
   }
 
-  const visibleArticles = showUnreadOnly
-    ? articles.filter((a) => !readIds.has(a.id))
-    : articles
+  const visibleArticles = articles.filter((a) => {
+    if (showFavoritesOnly && !a.is_favorite) return false
+    if (showUnreadOnly && readIds.has(a.id)) return false
+    return true
+  })
 
   const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0)
 
