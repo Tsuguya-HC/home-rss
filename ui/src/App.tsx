@@ -14,6 +14,7 @@ export default function App() {
   const [selectedFeedId, setSelectedFeedId] = useState<string | null>(null)
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null)
   const [showUnreadOnly, setShowUnreadOnly] = useState(true)
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
   const [readIds, setReadIds] = useState<Set<string>>(new Set())
   const [mobileView, setMobileView] = useState<MobileView>('list')
   const [error, setError] = useState<string | null>(null)
@@ -45,13 +46,13 @@ export default function App() {
   const loadArticles = useCallback(async () => {
     setLoadingArticles(true)
     try {
-      const articles = await api.getArticles(selectedFeedId, showUnreadOnly)
+      const articles = await api.getArticles(selectedFeedId, showUnreadOnly, showFavoritesOnly)
       setArticles(articles)
       setReadIds(new Set())
     } finally {
       setLoadingArticles(false)
     }
-  }, [selectedFeedId, showUnreadOnly])
+  }, [selectedFeedId, showUnreadOnly, showFavoritesOnly])
 
   useEffect(() => {
     withError(loadFeeds)
@@ -85,6 +86,28 @@ export default function App() {
       await api.markAllRead()
       setReadIds(new Set(articles.map((a) => a.id)))
       setUnreadCounts({})
+    })
+
+  const handleToggleFavorite = (article: Article) =>
+    withError(async () => {
+      const next = !article.is_favorite
+      setArticles((prev) => prev.map((a) => (a.id === article.id ? { ...a, is_favorite: next } : a)))
+      setSelectedArticle((prev) => (prev?.id === article.id ? { ...prev, is_favorite: next } : prev))
+      try {
+        if (article.is_favorite) {
+          await api.unmarkFavorite(article.id)
+        } else {
+          await api.markFavorite(article.id)
+        }
+      } catch (e) {
+        setArticles((prev) =>
+          prev.map((a) => (a.id === article.id ? { ...a, is_favorite: article.is_favorite } : a)),
+        )
+        setSelectedArticle((prev) =>
+          prev?.id === article.id ? { ...prev, is_favorite: article.is_favorite } : prev,
+        )
+        throw e
+      }
     })
 
   const handleAddFeed = async (url: string) => {
@@ -168,9 +191,11 @@ export default function App() {
     })
   }
 
-  const visibleArticles = showUnreadOnly
-    ? articles.filter((a) => !readIds.has(a.id))
-    : articles
+  const visibleArticles = articles.filter((a) => {
+    if (showFavoritesOnly && !a.is_favorite) return false
+    if (showUnreadOnly && readIds.has(a.id)) return false
+    return true
+  })
 
   const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0)
 
@@ -200,13 +225,19 @@ export default function App() {
             articles={visibleArticles}
             loading={loadingArticles}
             showUnreadOnly={showUnreadOnly}
+            showFavoritesOnly={showFavoritesOnly}
             selectedArticle={selectedArticle}
             onToggleUnread={() => {
               setShowUnreadOnly((v) => !v)
               setSelectedArticle(null)
             }}
+            onToggleFavorites={() => {
+              setShowFavoritesOnly((v) => !v)
+              setSelectedArticle(null)
+            }}
             onSelectArticle={handleSelectArticle}
             onMarkAllRead={handleMarkAllRead}
+            onToggleFavorite={handleToggleFavorite}
             onShowSidebar={() => setMobileView('sidebar')}
           />
         </section>
@@ -216,6 +247,7 @@ export default function App() {
             <ArticleDetail
               article={selectedArticle}
               onBack={() => setMobileView('list')}
+              onToggleFavorite={() => handleToggleFavorite(selectedArticle)}
             />
           ) : (
             <div className="detail-placeholder">記事を選択してください</div>
