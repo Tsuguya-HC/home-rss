@@ -7,9 +7,10 @@ interface ArticleListItemProps {
   isSelected: boolean
   onClick: () => void
   onToggleFavorite: (article: Article) => void
+  isFavoritePending?: boolean
 }
 
-export function ArticleListItem({ article, isSelected, onClick, onToggleFavorite }: ArticleListItemProps) {
+export function ArticleListItem({ article, isSelected, onClick, onToggleFavorite, isFavoritePending }: ArticleListItemProps) {
   const date = article.published_at ? formatDate(article.published_at) : null
   const [imgHidden, setImgHidden] = useState(false)
 
@@ -32,6 +33,7 @@ export function ArticleListItem({ article, isSelected, onClick, onToggleFavorite
               e.stopPropagation()
               onToggleFavorite(article)
             }}
+            disabled={isFavoritePending}
             title={article.favorite ? 'お気に入りを解除' : 'お気に入りに追加'}
             aria-label={article.favorite ? 'お気に入りを解除' : 'お気に入りに追加'}
           >

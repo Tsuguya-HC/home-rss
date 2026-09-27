@@ -204,53 +204,22 @@ async fn marking_favorite_is_idempotent_both_ways_and_unknown_id_is_404() {
     let feed = seed_feed(&db, "https://a.example/feed").await;
     let article = seed_article(&db, &feed, "fav-one", 1).await;
 
-    // Mark twice: both 204, one row.
     assert_eq!(post(&format!("/api/articles/{article}/favorite"), None).await, 204);
     assert_eq!(post(&format!("/api/articles/{article}/favorite"), None).await, 204);
     assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 1);
 
-    // The mark is visible in the list response.
     let (_, all) = get_json("/api/articles").await;
     assert!(is_favorite(&all, "fav-one"));
 
-    // Unmark twice: both 204, no rows left.
-    assert_eq!(
-        reqwest::Client::new()
-            .delete(server(&format!("/api/articles/{article}/favorite")))
-            .send()
-            .await
-            .expect("DELETE favorite")
-            .status()
-            .as_u16(),
-        204
-    );
-    assert_eq!(
-        reqwest::Client::new()
-            .delete(server(&format!("/api/articles/{article}/favorite")))
-            .send()
-            .await
-            .expect("DELETE favorite")
-            .status()
-            .as_u16(),
-        204
-    );
+    assert_eq!(delete(&format!("/api/articles/{article}/favorite")).await, 204);
+    assert_eq!(delete(&format!("/api/articles/{article}/favorite")).await, 204);
     assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 0);
     let (_, all) = get_json("/api/articles").await;
     assert!(!is_favorite(&all, "fav-one"));
 
-    // Marking / unmarking an article that no longer exists is 404, not 500.
     let missing = "00000000-0000-0000-0000-000000000000";
     assert_eq!(post(&format!("/api/articles/{missing}/favorite"), None).await, 404);
-    assert_eq!(
-        reqwest::Client::new()
-            .delete(server(&format!("/api/articles/{missing}/favorite")))
-            .send()
-            .await
-            .expect("DELETE favorite")
-            .status()
-            .as_u16(),
-        404
-    );
+    assert_eq!(delete(&format!("/api/articles/{missing}/favorite")).await, 404);
 }
 
 #[tokio::test]
@@ -278,7 +247,6 @@ async fn article_list_filters_by_favorite_combined_with_feed_and_unread() {
     let (_, favs_of_a) = get_json(&format!("/api/articles?feed_id={a}&favorite=true")).await;
     assert_eq!(titles(&favs_of_a), ["a-fav-read", "a-fav-unread"]);
 
-    // Favorites that are also unread: combines with the existing unread-only view.
     let (_, unread_favs) = get_json("/api/articles?favorite=true&unread=true").await;
     assert_eq!(titles(&unread_favs), ["a-fav-unread", "b-fav-unread"]);
 
@@ -308,21 +276,10 @@ async fn cleaner_keeps_favorites_and_unmarking_makes_them_eligible_again() {
     };
     assert_eq!(clean().await, 200);
 
-    // A favorite survives the cleaner, whether read or not.
     let (_, left) = get_json("/api/articles").await;
     assert_eq!(titles(&left), ["old-fav-read", "old-fav-unread"]);
 
-    // Unmarking makes the read one eligible again; the unread one stays regardless.
-    assert_eq!(
-        reqwest::Client::new()
-            .delete(server(&format!("/api/articles/{old_fav_read}/favorite")))
-            .send()
-            .await
-            .expect("DELETE favorite")
-            .status()
-            .as_u16(),
-        204
-    );
+    assert_eq!(delete(&format!("/api/articles/{old_fav_read}/favorite")).await, 204);
     assert_eq!(clean().await, 200);
     let (_, left) = get_json("/api/articles").await;
     assert_eq!(titles(&left), ["old-fav-unread"]);

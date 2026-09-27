@@ -6,9 +6,10 @@ interface ArticleDetailProps {
   article: Article
   onBack: () => void
   onToggleFavorite: (article: Article) => void
+  isFavoritePending?: boolean
 }
 
-export function ArticleDetail({ article, onBack, onToggleFavorite }: ArticleDetailProps) {
+export function ArticleDetail({ article, onBack, onToggleFavorite, isFavoritePending }: ArticleDetailProps) {
   const date = article.published_at ? formatDateTime(article.published_at) : null
 
   return (
@@ -20,6 +21,7 @@ export function ArticleDetail({ article, onBack, onToggleFavorite }: ArticleDeta
         <button
           className="btn-icon favorite-btn"
           onClick={() => onToggleFavorite(article)}
+          disabled={isFavoritePending}
           title={article.favorite ? 'お気に入りを解除' : 'お気に入りに追加'}
           aria-label={article.favorite ? 'お気に入りを解除' : 'お気に入りに追加'}
         >

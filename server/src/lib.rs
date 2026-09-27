@@ -136,9 +136,10 @@ fn row_to_article(row: &Row) -> Result<Article> {
     })
 }
 
-/// Filters over (feed_id, unread, favorite) without hand-multiplying branches:
-/// each active filter appends one predicate and one placeholder in the same
-/// order, so adding the favorite axis here stays at 3 predicates, not 8 arms.
+/// Filters over (feed_id, unread, favorite) without hand-multiplying branches.
+/// Only feed_id takes a placeholder; unread and favorite append subquery
+/// predicates with no placeholder, so adding the favorite axis here stays
+/// at 3 predicates, not 8 arms.
 fn build_article_list_query(
     feed_id: Option<String>,
     unread: bool,
@@ -312,14 +313,19 @@ async fn article_exists(conn: &spin_sdk::pg::Connection, id: &str) -> Result<boo
 
 async fn mark_favorite(id: &str) -> Result<Resp> {
     let conn = db::connect().await?;
-    if !article_exists(&conn, id).await? {
+    // 存在確認を先に行うと、その直後に親フィードが消された場合に
+    // INSERT が FK 違反で 500 になる。記事が現存するときだけ行を作る
+    // 1 文にまとめ、書き込めなかった側を存在確認で切り分ける。
+    let rows = conn
+        .execute(
+            "INSERT INTO favorites (article_id) SELECT $1 WHERE EXISTS \
+             (SELECT 1 FROM articles WHERE id = $1) ON CONFLICT DO NOTHING",
+            vec![ParameterValue::Uuid(id.to_owned())],
+        )
+        .await?;
+    if rows == 0 && !article_exists(&conn, id).await? {
         return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
     }
-    conn.execute(
-        "INSERT INTO favorites (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        vec![ParameterValue::Uuid(id.to_owned())],
-    )
-    .await?;
 
     Ok(empty(StatusCode::NO_CONTENT))
 }
