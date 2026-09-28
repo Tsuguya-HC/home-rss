@@ -42,7 +42,7 @@ home-rss/
 ├── cleaner/          # 古い記事削除 (command trigger)
 ├── shared/           # 共有ライブラリ (DB モデル、型定義、取得+保存、SSRF ガード)
 ├── migrations/       # SQL マイグレーション
-├── docs/             # 運用メモ（network-access.md: CNP と外部アクセス）
+├── docs/             # network-access.md: CNP と外部アクセス / spec.md: アプリが今どう動くかと守るべき性質
 ├── scripts/          # test.sh: 全部のテスト
 ├── Cargo.toml        # workspace
 └── .github/workflows/
@@ -64,6 +64,8 @@ Cargo workspace で `shared` クレートを共有。各サービスは独立し
 - **CI**: GitHub Actions (`spin build` → `spin registry push`)
 
 ## 開発
+
+振る舞いを変えたら `docs/spec.md`（データの書き手・読み手、同時実行、守るべき性質）も直す。
 
 ### ローカル実行
 
