@@ -43,6 +43,7 @@ home-rss/
 ├── shared/           # 共有ライブラリ (DB モデル、型定義、取得+保存、SSRF ガード)
 ├── migrations/       # SQL マイグレーション
 ├── docs/             # 運用メモ（network-access.md: CNP と外部アクセス）
+├── scripts/          # test.sh: 全部のテスト
 ├── Cargo.toml        # workspace
 └── .github/workflows/
     ├── ci.yml        # detect changes → leaf ジョブ → CI Gate
@@ -109,6 +110,15 @@ E2E_DATABASE_URL="postgres://postgres:e2e@${IP}:5432/rss?sslmode=disable" e2e/ru
   新しい CLI は、ノードが動かせない component でも緑にしてしまう
 - DB を渡さなければ失敗する。skip はしない
 - シナリオは HTTP を叩き、データは DB に直接入れる。外部のフィードは取得しない
+
+### 全部のテスト
+
+```bash
+E2E_DATABASE_URL=... scripts/test.sh
+```
+
+Rust の単体テスト・UI のテスト・e2e を順に回す。テストの種類を足したらここにも足す
+（自動の実装ではこれだけがテスト全体として回る）。
 
 ### UI のテスト
 

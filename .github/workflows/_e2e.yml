@@ -1,7 +1,8 @@
 name: e2e
 
-# Runs e2e/run.sh: the server and the cleaner under `spin up` against a throwaway
-# PostgreSQL. Verification only; nothing here is published.
+# Runs scripts/test.sh: Rust unit tests, the UI suite, and e2e/run.sh (server and
+# cleaner under `spin up` against a throwaway PostgreSQL). Verification only;
+# nothing here is published.
 on:
   workflow_call:
 
@@ -65,6 +66,17 @@ jobs:
           version: v${{ env.SPIN_CLI_VERSION }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      # scripts/test.sh runs the UI suite too (pnpm install + pnpm test).
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ui/package.json
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
       - name: Install dbmate
         run: |
           set -euo pipefail
@@ -73,7 +85,7 @@ jobs:
           echo "${DBMATE_SHA256}  $RUNNER_TEMP/dbmate" | sha256sum -c -
           install -m 0755 "$RUNNER_TEMP/dbmate" /usr/local/bin/dbmate
 
-      - name: Run e2e/run.sh
+      - name: Run scripts/test.sh
         env:
           E2E_DATABASE_URL: postgres://rss:e2e@localhost:5432/rss?sslmode=disable
-        run: e2e/run.sh
+        run: scripts/test.sh
