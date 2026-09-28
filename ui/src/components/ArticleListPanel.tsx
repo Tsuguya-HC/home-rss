@@ -5,9 +5,13 @@ interface ArticleListPanelProps {
   articles: Article[]
   loading: boolean
   showUnreadOnly: boolean
+  showFavoritesOnly: boolean
   selectedArticle: Article | null
+  pendingFavoriteIds: Set<string>
   onToggleUnread: () => void
+  onToggleFavorites: () => void
   onSelectArticle: (article: Article) => void
+  onToggleFavorite: (article: Article) => void
   onMarkAllRead: () => void
   onShowSidebar: () => void
 }
@@ -16,9 +20,13 @@ export function ArticleListPanel({
   articles,
   loading,
   showUnreadOnly,
+  showFavoritesOnly,
   selectedArticle,
+  pendingFavoriteIds,
   onToggleUnread,
+  onToggleFavorites,
   onSelectArticle,
+  onToggleFavorite,
   onMarkAllRead,
   onShowSidebar,
 }: ArticleListPanelProps) {
@@ -37,6 +45,14 @@ export function ArticleListPanel({
             />
             未読のみ
           </label>
+          <label className="toggle-label">
+            <input
+              type="checkbox"
+              checked={showFavoritesOnly}
+              onChange={onToggleFavorites}
+            />
+            お気に入りのみ
+          </label>
           <button className="btn btn--secondary btn--sm" onClick={onMarkAllRead}>
             全既読
           </button>
@@ -54,7 +70,9 @@ export function ArticleListPanel({
               key={article.id}
               article={article}
               isSelected={selectedArticle?.id === article.id}
+              favoritePending={pendingFavoriteIds.has(article.id)}
               onClick={() => onSelectArticle(article)}
+              onToggleFavorite={() => onToggleFavorite(article)}
             />
           ))}
         </ul>

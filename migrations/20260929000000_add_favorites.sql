@@ -1,0 +1,8 @@
+-- migrate:up
+CREATE TABLE favorites (
+  article_id UUID REFERENCES articles(id) ON DELETE CASCADE,
+  PRIMARY KEY (article_id)
+);
+
+-- migrate:down
+DROP TABLE IF EXISTS favorites;

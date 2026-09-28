@@ -20,7 +20,7 @@ async fn fresh_db() -> Client {
         conn.await.expect("e2e database connection");
     });
     client
-        .batch_execute("TRUNCATE feeds, articles, read_status CASCADE")
+        .batch_execute("TRUNCATE feeds, articles, read_status, favorites CASCADE")
         .await
         .expect("reset tables");
     client
@@ -53,6 +53,15 @@ async fn mark_read_in_db(db: &Client, article_id: &str) {
     )
     .await
     .expect("insert read_status");
+}
+
+async fn mark_favorite_in_db(db: &Client, article_id: &str) {
+    db.execute(
+        "INSERT INTO favorites (article_id) VALUES ($1::text::uuid)",
+        &[&article_id],
+    )
+    .await
+    .expect("insert favorites");
 }
 
 async fn count(db: &Client, sql: &str) -> i64 {
@@ -207,4 +216,129 @@ async fn cleaner_deletes_only_read_articles_past_retention() {
 
     let (_, left) = get_json("/api/articles").await;
     assert_eq!(titles(&left), ["old-unread", "recent-read"]);
+}
+
+// --- #152: お気に入り ---
+
+// 捕まえる変異: ON CONFLICT DO NOTHING 無しの INSERT（2 回目で 500 になる）、
+// 存在チェック無しの INSERT（未知 id で FK 違反の 500 になる）、
+// DELETE の affected 行数を見ない実装（未知 id の解除が 204 になる）。
+// エンドポイントの形（POST でマーク、DELETE で解除）は #152 の要求からは
+// 決まらない実装判断で、tests-report.md に申し送ってある。
+#[tokio::test]
+async fn marking_favorite_is_idempotent_both_ways_and_404_for_unknown() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "one", 1).await;
+
+    assert_eq!(post(&format!("/api/articles/{article}/favorite"), None).await, 204);
+    assert_eq!(post(&format!("/api/articles/{article}/favorite"), None).await, 204);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 1);
+
+    assert_eq!(delete(&format!("/api/articles/{article}/favorite")).await, 204);
+    assert_eq!(delete(&format!("/api/articles/{article}/favorite")).await, 204);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 0);
+
+    let missing = "00000000-0000-0000-0000-000000000000";
+    assert_eq!(post(&format!("/api/articles/{missing}/favorite"), None).await, 404);
+    assert_eq!(delete(&format!("/api/articles/{missing}/favorite")).await, 404);
+}
+
+// 捕まえる変異: favorite 軸を無視する SQL（絞り込みが効かない）、
+// フラグ列を返さない SELECT（favorite キーが無いか null になる）。
+// a-fav-read（既読のお気に入り）を混ぜているのは、unread との
+// 組み合わせで既読のお気に入りが落ちる変異を捕まえるため。
+#[tokio::test]
+async fn favorite_filter_combines_with_feed_and_unread_and_flag_is_visible() {
+    let db = fresh_db().await;
+    let a = seed_feed(&db, "https://a.example/feed").await;
+    let b = seed_feed(&db, "https://b.example/feed").await;
+    let a_fav_read = seed_article(&db, &a, "a-fav-read", 1).await;
+    let a_fav_unread = seed_article(&db, &a, "a-fav-unread", 1).await;
+    seed_article(&db, &a, "a-plain", 1).await;
+    let b_fav_unread = seed_article(&db, &b, "b-fav-unread", 1).await;
+    mark_read_in_db(&db, &a_fav_read).await;
+    for id in [&a_fav_read, &a_fav_unread, &b_fav_unread] {
+        mark_favorite_in_db(&db, id).await;
+    }
+
+    let (_, favs) = get_json("/api/articles?favorite=true").await;
+    assert_eq!(titles(&favs), ["a-fav-read", "a-fav-unread", "b-fav-unread"]);
+
+    let (_, fav_unread) = get_json("/api/articles?favorite=true&unread=true").await;
+    assert_eq!(titles(&fav_unread), ["a-fav-unread", "b-fav-unread"]);
+
+    let (_, fav_of_a) = get_json(&format!("/api/articles?feed_id={a}&favorite=true")).await;
+    assert_eq!(titles(&fav_of_a), ["a-fav-read", "a-fav-unread"]);
+
+    let (_, fav_unread_of_a) =
+        get_json(&format!("/api/articles?feed_id={a}&favorite=true&unread=true")).await;
+    assert_eq!(titles(&fav_unread_of_a), ["a-fav-unread"]);
+
+    // a-plain を含めるのは、真の行だけにキーを載せる変異を捕まえるため。
+    let (_, all) = get_json("/api/articles").await;
+    let flags: Vec<(&str, bool)> = all
+        .as_array()
+        .expect("array of articles")
+        .iter()
+        .map(|a| {
+            (
+                a["title"].as_str().expect("title"),
+                a["favorite"].as_bool().expect("favorite flag"),
+            )
+        })
+        .collect();
+    assert!(flags.contains(&("a-fav-read", true)));
+    assert!(flags.contains(&("a-plain", false)));
+}
+
+// 捕まえる変異: お気に入り除外の無い DELETE（fav-read/fav-unread が消える）、
+// 解除後の再 clean を回さないと「解除で再び対象」が検証できない。
+// fav-unread（未読のお気に入り）を混ぜているのは、既読条件と
+// お気に入り除外のどちらで残ったかが区別できなくなるため。
+#[tokio::test]
+async fn cleaner_keeps_favorites_read_or_not() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let fav_read = seed_article(&db, &feed, "fav-read", 15).await;
+    let fav_unread = seed_article(&db, &feed, "fav-unread", 15).await;
+    let doomed = seed_article(&db, &feed, "doomed", 15).await;
+    mark_read_in_db(&db, &fav_read).await;
+    mark_read_in_db(&db, &doomed).await;
+    mark_favorite_in_db(&db, &fav_read).await;
+    mark_favorite_in_db(&db, &fav_unread).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/clean", env("E2E_CLEANER_URL")))
+        .send()
+        .await
+        .expect("POST /clean");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let (_, left) = get_json("/api/articles").await;
+    assert_eq!(titles(&left), ["fav-read", "fav-unread"]);
+
+    assert_eq!(delete(&format!("/api/articles/{fav_read}/favorite")).await, 204);
+    let resp = reqwest::Client::new()
+        .post(format!("{}/clean", env("E2E_CLEANER_URL")))
+        .send()
+        .await
+        .expect("POST /clean again");
+    assert_eq!(resp.status().as_u16(), 200);
+    let (_, left) = get_json("/api/articles").await;
+    assert_eq!(titles(&left), ["fav-unread"]);
+}
+
+// 捕まえる変異: favorites に ON DELETE CASCADE が無い実装
+//（articles は消えるが favorites 行が残り最後のアサートが落ちる）。
+#[tokio::test]
+async fn deleting_a_feed_removes_its_favorites() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "one", 1).await;
+    mark_favorite_in_db(&db, &article).await;
+
+    assert_eq!(delete(&format!("/api/feeds/{feed}")).await, 204);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 0);
 }

@@ -35,6 +35,8 @@ async fn route(req: Request) -> Result<Resp> {
         (&Method::GET, ["api", "articles"]) => list_articles(&query).await,
         (&Method::POST, ["api", "articles", "read-all"]) => mark_all_read().await,
         (&Method::POST, ["api", "articles", id, "read"]) => mark_read(id).await,
+        (&Method::POST, ["api", "articles", id, "favorite"]) => mark_favorite(id).await,
+        (&Method::DELETE, ["api", "articles", id, "favorite"]) => unmark_favorite(id).await,
         (&Method::POST, ["api", "import", "opml"]) => import_opml(req).await,
         (&Method::GET, ["api", "stats"]) => get_stats().await,
         _ => Ok(error_response(StatusCode::NOT_FOUND, "not found")),
@@ -111,7 +113,8 @@ const FEED_SELECT: &str = "SELECT id::text, url, title, site_url, etag, last_mod
 
 const ARTICLE_SELECT: &str = "SELECT a.id::text, a.feed_id::text, a.url, a.title, a.content, a.author, \
      EXTRACT(EPOCH FROM a.published_at)::bigint, \
-     EXTRACT(EPOCH FROM a.fetched_at)::bigint, a.image_url \
+     EXTRACT(EPOCH FROM a.fetched_at)::bigint, a.image_url, \
+     EXISTS (SELECT 1 FROM favorites f WHERE f.article_id = a.id) \
      FROM articles a";
 
 fn row_to_feed(row: &Row) -> Result<Feed> {
@@ -129,7 +132,30 @@ fn row_to_article(row: &Row) -> Result<Article> {
         published_at: Option::<i64>::decode(&row[6])?,
         fetched_at: Option::<i64>::decode(&row[7])?,
         image_url: Option::<String>::decode(&row[8])?,
+        favorite: bool::decode(&row[9])?,
     })
+}
+
+fn article_list_sql(feed_id: Option<&str>, unread: bool, favorite_only: bool) -> (String, Vec<ParameterValue>) {
+    let mut sql = String::from(ARTICLE_SELECT);
+    let mut conditions = Vec::new();
+    let mut params = Vec::new();
+    if let Some(fid) = feed_id {
+        params.push(ParameterValue::Uuid(fid.to_owned()));
+        conditions.push(format!("a.feed_id = ${}", params.len()));
+    }
+    if unread {
+        conditions.push("NOT EXISTS (SELECT 1 FROM read_status rs WHERE rs.article_id = a.id)".to_owned());
+    }
+    if favorite_only {
+        conditions.push("EXISTS (SELECT 1 FROM favorites f WHERE f.article_id = a.id)".to_owned());
+    }
+    if !conditions.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" AND "));
+    }
+    sql.push_str(" ORDER BY a.published_at DESC NULLS LAST");
+    (sql, params)
 }
 
 async fn list_feeds() -> Result<Resp> {
@@ -246,41 +272,14 @@ async fn list_articles(query: &str) -> Result<Resp> {
         .get("unread")
         .map(|s| s == "true")
         .unwrap_or(false);
+    let favorite_only = params_map
+        .get("favorite")
+        .map(|s| s == "true")
+        .unwrap_or(false);
 
     let conn = db::connect().await?;
 
-    let (sql, query_params): (String, Vec<ParameterValue>) = match (feed_id, unread) {
-        (Some(fid), true) => (
-            format!(
-                "{ARTICLE_SELECT} \
-                 LEFT JOIN read_status rs ON a.id = rs.article_id \
-                 WHERE a.feed_id = $1 AND rs.article_id IS NULL \
-                 ORDER BY a.published_at DESC NULLS LAST"
-            ),
-            vec![ParameterValue::Uuid(fid)],
-        ),
-        (Some(fid), false) => (
-            format!(
-                "{ARTICLE_SELECT} \
-                 WHERE a.feed_id = $1 \
-                 ORDER BY a.published_at DESC NULLS LAST"
-            ),
-            vec![ParameterValue::Uuid(fid)],
-        ),
-        (None, true) => (
-            format!(
-                "{ARTICLE_SELECT} \
-                 LEFT JOIN read_status rs ON a.id = rs.article_id \
-                 WHERE rs.article_id IS NULL \
-                 ORDER BY a.published_at DESC NULLS LAST"
-            ),
-            vec![],
-        ),
-        (None, false) => (
-            format!("{ARTICLE_SELECT} ORDER BY a.published_at DESC NULLS LAST"),
-            vec![],
-        ),
-    };
+    let (sql, query_params) = article_list_sql(feed_id.as_deref(), unread, favorite_only);
 
     let rows = conn.query(sql, query_params).await?.collect().await?;
     let articles: Vec<Article> = rows.iter().map(row_to_article).collect::<Result<_>>()?;
@@ -296,6 +295,46 @@ async fn mark_read(id: &str) -> Result<Resp> {
     .await?;
 
     Ok(empty(StatusCode::NO_CONTENT))
+}
+
+async fn mark_favorite(id: &str) -> Result<Resp> {
+    let conn = db::connect().await?;
+    if article_missing(&conn, id).await? {
+        return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+    }
+    conn.execute(
+        "INSERT INTO favorites (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        vec![ParameterValue::Uuid(id.to_owned())],
+    )
+    .await?;
+
+    Ok(empty(StatusCode::NO_CONTENT))
+}
+
+async fn unmark_favorite(id: &str) -> Result<Resp> {
+    let conn = db::connect().await?;
+    if article_missing(&conn, id).await? {
+        return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+    }
+    conn.execute(
+        "DELETE FROM favorites WHERE article_id = $1",
+        vec![ParameterValue::Uuid(id.to_owned())],
+    )
+    .await?;
+
+    Ok(empty(StatusCode::NO_CONTENT))
+}
+
+async fn article_missing(conn: &spin_sdk::pg::Connection, id: &str) -> Result<bool> {
+    let rows = conn
+        .query(
+            "SELECT 1 FROM articles WHERE id = $1",
+            vec![ParameterValue::Uuid(id.to_owned())],
+        )
+        .await?
+        .collect()
+        .await?;
+    Ok(rows.is_empty())
 }
 
 async fn mark_all_read() -> Result<Resp> {
@@ -421,7 +460,49 @@ async fn get_stats() -> Result<Resp> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_opml;
+    use super::{article_list_sql, parse_opml};
+
+    // ARTICLE_SELECT 自体が favorite フラグ列のために favorites を 1 回
+    // 含むので、絞り込み条件の有無は出現回数で見る。
+    fn favorites_mentions(sql: &str) -> usize {
+        sql.match_indices("favorites").count()
+    }
+
+    #[test]
+    fn article_list_sql_combines_all_three_axes_without_multiplication() {
+        let (sql, params) =
+            article_list_sql(Some("00000000-0000-0000-0000-000000000000"), true, true);
+        assert!(sql.contains("a.feed_id = $1"));
+        assert!(sql.contains("read_status"));
+        assert_eq!(favorites_mentions(&sql), 2);
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn article_list_sql_omits_conditions_by_default() {
+        let (sql, params) = article_list_sql(None, false, false);
+        assert!(!sql.contains("read_status"));
+        assert!(!sql.contains("a.feed_id = $"));
+        assert_eq!(favorites_mentions(&sql), 1);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn article_list_sql_keeps_favorite_only_without_other_axes() {
+        // favorite だけを外すと絞り込みが消える変異を捕まえる。
+        let (sql, params) = article_list_sql(None, false, true);
+        assert_eq!(favorites_mentions(&sql), 2);
+        assert!(!sql.contains("read_status"));
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn article_list_sql_keeps_unread_without_favorite() {
+        // unread と favorite を取り違えると落ちる。
+        let (sql, _) = article_list_sql(None, true, false);
+        assert!(sql.contains("read_status"));
+        assert_eq!(favorites_mentions(&sql), 1);
+    }
 
     #[test]
     fn extracts_urls_from_nested_and_self_closing_outlines() {

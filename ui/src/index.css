@@ -354,6 +354,22 @@ body {
   border-radius: 6px;
   flex-shrink: 0;
 }
+.favorite-star {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  color: var(--color-text-muted);
+  padding: 0 6px 0 0;
+  line-height: 1;
+}
+.favorite-star:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+.favorite-star--active {
+  color: #d97706;
+}
 
 /* Article detail panel */
 .article-detail {

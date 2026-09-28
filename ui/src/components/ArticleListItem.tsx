@@ -5,10 +5,12 @@ import { formatDate } from '../lib/date'
 interface ArticleListItemProps {
   article: Article
   isSelected: boolean
+  favoritePending: boolean
   onClick: () => void
+  onToggleFavorite: () => void
 }
 
-export function ArticleListItem({ article, isSelected, onClick }: ArticleListItemProps) {
+export function ArticleListItem({ article, isSelected, favoritePending, onClick, onToggleFavorite }: ArticleListItemProps) {
   const date = article.published_at ? formatDate(article.published_at) : null
   const [imgHidden, setImgHidden] = useState(false)
 
@@ -24,7 +26,22 @@ export function ArticleListItem({ article, isSelected, onClick }: ArticleListIte
       onClick={onClick}
     >
       <div className="article-item-body">
-        <div className="article-item-title">{article.title}</div>
+        <div className="article-item-title">
+          <button
+            type="button"
+            className={`favorite-star${article.favorite ? ' favorite-star--active' : ''}`}
+            aria-label={article.favorite ? 'お気に入りを解除' : 'お気に入りに追加'}
+            aria-pressed={article.favorite}
+            disabled={favoritePending}
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleFavorite()
+            }}
+          >
+            {article.favorite ? '★' : '☆'}
+          </button>
+          {article.title}
+        </div>
         {date && <div className="article-item-date">{date}</div>}
       </div>
       {imageUrl && (

@@ -4,10 +4,12 @@ import { formatDateTime } from '../lib/date'
 
 interface ArticleDetailProps {
   article: Article
+  favoritePending: boolean
+  onToggleFavorite: () => void
   onBack: () => void
 }
 
-export function ArticleDetail({ article, onBack }: ArticleDetailProps) {
+export function ArticleDetail({ article, favoritePending, onToggleFavorite, onBack }: ArticleDetailProps) {
   const date = article.published_at ? formatDateTime(article.published_at) : null
 
   return (
@@ -15,6 +17,16 @@ export function ArticleDetail({ article, onBack }: ArticleDetailProps) {
       <div className="detail-header">
         <button className="btn-icon back-btn mobile-back-btn" onClick={onBack} title="戻る">
           ←
+        </button>
+        <button
+          type="button"
+          className={`favorite-star${article.favorite ? ' favorite-star--active' : ''}`}
+          aria-label={article.favorite ? 'お気に入りを解除' : 'お気に入りに追加'}
+          aria-pressed={article.favorite}
+          disabled={favoritePending}
+          onClick={onToggleFavorite}
+        >
+          {article.favorite ? '★ お気に入り' : '☆ お気に入り'}
         </button>
         <a
           href={article.url}
