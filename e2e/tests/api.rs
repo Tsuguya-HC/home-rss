@@ -216,12 +216,7 @@ async fn cleaner_deletes_only_read_articles_past_retention() {
     mark_read_in_db(&db, &old_read).await;
     mark_read_in_db(&db, &recent_read).await;
 
-    let resp = reqwest::Client::new()
-        .post(format!("{}/clean", env("E2E_CLEANER_URL")))
-        .send()
-        .await
-        .expect("POST /clean");
-    assert_eq!(resp.status().as_u16(), 200);
+    run_cleaner().await;
 
     let (_, left) = get_json("/api/articles").await;
     assert_eq!(titles(&left), ["old-unread", "recent-read"]);
@@ -321,6 +316,15 @@ async fn deleting_a_feed_removes_favorites_with_its_articles() {
     assert_eq!(delete(&format!("/api/feeds/{feed}")).await, 204);
     assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
     assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 0);
+}
+
+#[tokio::test]
+async fn marking_favorite_with_malformed_uuid_is_a_server_error() {
+    let _db = fresh_db().await;
+    // 形式不正の UUID は記事の有無の問題ではなく DB 層での変換失敗なので、
+    // mark_read / delete_feed と同じく 500 になるべき。今の mark_favorite は
+    // article_exists の Err を 404 に丸めているのでここが 404 になって落ちる。
+    assert_eq!(post("/api/articles/abc/favorite", None).await, 500);
 }
 
 #[tokio::test]

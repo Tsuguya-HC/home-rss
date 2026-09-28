@@ -90,45 +90,46 @@ export default function App() {
       setUnreadCounts({})
     })
 
-  const handleToggleFavorite = async (article: Article) => {
-    const isFavorite = favoriteIds.has(article.id)
-    setFavoriteIds((prev) => {
-      const next = new Set(prev)
-      if (isFavorite) {
-        next.delete(article.id)
-      } else {
-        next.add(article.id)
-      }
-      return next
-    })
-    try {
-      if (isFavorite) {
-        await api.unmarkFavorite(article.id)
-      } else {
-        await api.markFavorite(article.id)
-      }
-      setArticles((prev) =>
-        prev.map((a) => (a.id === article.id ? { ...a, is_favorite: !isFavorite } : a)),
-      )
-      setSelectedArticle((prev) =>
-        prev?.id === article.id ? { ...prev, is_favorite: !isFavorite } : prev,
-      )
-      if (showFavoritesOnly && isFavorite) {
-        setArticles((prev) => prev.filter((a) => a.id !== article.id))
-      }
-    } catch (e) {
+  const handleToggleFavorite = (article: Article) =>
+    withError(async () => {
+      const isFavorite = favoriteIds.has(article.id)
       setFavoriteIds((prev) => {
         const next = new Set(prev)
         if (isFavorite) {
-          next.add(article.id)
-        } else {
           next.delete(article.id)
+        } else {
+          next.add(article.id)
         }
         return next
       })
-      throw e
-    }
-  }
+      try {
+        if (isFavorite) {
+          await api.unmarkFavorite(article.id)
+        } else {
+          await api.markFavorite(article.id)
+        }
+        setArticles((prev) =>
+          prev.map((a) => (a.id === article.id ? { ...a, is_favorite: !isFavorite } : a)),
+        )
+        setSelectedArticle((prev) =>
+          prev?.id === article.id ? { ...prev, is_favorite: !isFavorite } : prev,
+        )
+        if (showFavoritesOnly && isFavorite) {
+          setArticles((prev) => prev.filter((a) => a.id !== article.id))
+        }
+      } catch (e) {
+        setFavoriteIds((prev) => {
+          const next = new Set(prev)
+          if (isFavorite) {
+            next.add(article.id)
+          } else {
+            next.delete(article.id)
+          }
+          return next
+        })
+        throw e
+      }
+    })
 
   const handleAddFeed = async (url: string) => {
     await withError(async () => {

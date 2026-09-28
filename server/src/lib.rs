@@ -303,18 +303,20 @@ async fn article_exists(conn: &spin_sdk::pg::Connection, id: &str) -> Result<boo
 
 async fn mark_favorite(id: &str) -> Result<Resp> {
     let conn = db::connect().await?;
-    match article_exists(&conn, id).await {
-        Ok(true) => {}
-        Ok(false) => return Ok(error_response(StatusCode::NOT_FOUND, "article not found")),
-        Err(_) => return Ok(error_response(StatusCode::NOT_FOUND, "article not found")),
-    }
+    // SELECT→INSERT を分けていた頃は間に記事が消えると INSERT が FK 違反で
+    // 500 になったので、存在確認を兼ねた単文にした。
     conn.execute(
-        "INSERT INTO favorites (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        "INSERT INTO favorites (article_id) \
+         SELECT id FROM articles WHERE id = $1 \
+         ON CONFLICT DO NOTHING",
         vec![ParameterValue::Uuid(id.to_owned())],
     )
     .await?;
-
-    Ok(empty(StatusCode::NO_CONTENT))
+    if article_exists(&conn, id).await? {
+        Ok(empty(StatusCode::NO_CONTENT))
+    } else {
+        Ok(error_response(StatusCode::NOT_FOUND, "article not found"))
+    }
 }
 
 async fn unmark_favorite(id: &str) -> Result<Resp> {
