@@ -303,20 +303,38 @@ async fn article_exists(conn: &spin_sdk::pg::Connection, id: &str) -> Result<boo
 
 async fn mark_favorite(id: &str) -> Result<Resp> {
     let conn = db::connect().await?;
-    // SELECT→INSERT を分けていた頃は間に記事が消えると INSERT が FK 違反で
-    // 500 になったので、存在確認を兼ねた単文にした。
-    conn.execute(
-        "INSERT INTO favorites (article_id) \
-         SELECT id FROM articles WHERE id = $1 \
-         ON CONFLICT DO NOTHING",
-        vec![ParameterValue::Uuid(id.to_owned())],
-    )
-    .await?;
+    // 単文にしても INSERT 実行中の同時削除とは競合するので、外部キー違反は
+    // 「その場で消えた記事」として 404 に写す。INSERT ... SELECT は存在する
+    // id しか入れないので、この文からの 23503 は競合削除以外では起きない。
+    match conn
+        .execute(
+            "INSERT INTO favorites (article_id) \
+             SELECT id FROM articles WHERE id = $1 \
+             ON CONFLICT DO NOTHING",
+            vec![ParameterValue::Uuid(id.to_owned())],
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(e) if is_concurrent_article_deletion(&e) => {
+            return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
+        }
+        Err(e) => return Err(e.into()),
+    }
     if article_exists(&conn, id).await? {
         Ok(empty(StatusCode::NO_CONTENT))
     } else {
         Ok(error_response(StatusCode::NOT_FOUND, "article not found"))
     }
+}
+
+fn is_concurrent_article_deletion(e: &spin_sdk::pg::Error) -> bool {
+    matches!(
+        e,
+        spin_sdk::pg::Error::PgError(spin_sdk::pg::PgError::QueryFailed(
+            spin_sdk::pg::QueryError::DbError(db)
+        )) if db.code == "23503"
+    )
 }
 
 async fn unmark_favorite(id: &str) -> Result<Resp> {
@@ -597,6 +615,38 @@ mod tests {
             spin_sdk::http::StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_ne!(resp.status(), spin_sdk::http::StatusCode::BAD_GATEWAY);
+    }
+
+    fn db_error(code: &str) -> spin_sdk::pg::Error {
+        spin_sdk::pg::Error::PgError(spin_sdk::pg::PgError::QueryFailed(
+            spin_sdk::pg::QueryError::DbError(spin_sdk::pg::DbError {
+                as_text: format!("code {code}"),
+                severity: "ERROR".to_owned(),
+                code: code.to_owned(),
+                message: "test".to_owned(),
+                detail: None,
+                extras: Vec::new(),
+            }),
+        ))
+    }
+
+    #[test]
+    fn only_foreign_key_violation_counts_as_concurrent_article_deletion() {
+        // 23503 を別コードに変えると競合削除が 500 に戻る。23503 以外の
+        // DB エラーを 404 に写す書き方だと形式不正 UUID まで 404 になる。
+        assert!(super::is_concurrent_article_deletion(&db_error("23503")));
+        assert!(!super::is_concurrent_article_deletion(&db_error("23505")));
+        assert!(!super::is_concurrent_article_deletion(
+            &spin_sdk::pg::Error::PgError(spin_sdk::pg::PgError::QueryFailed(
+                spin_sdk::pg::QueryError::Text("boom".to_owned())
+            ))
+        ));
+        assert!(!super::is_concurrent_article_deletion(
+            &spin_sdk::pg::Error::PgError(spin_sdk::pg::PgError::Other("boom".to_owned()))
+        ));
+        assert!(!super::is_concurrent_article_deletion(
+            &spin_sdk::pg::Error::Decode("boom".to_owned())
+        ));
     }
 
     #[test]

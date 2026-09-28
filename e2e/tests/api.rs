@@ -328,6 +328,31 @@ async fn marking_favorite_with_malformed_uuid_is_a_server_error() {
 }
 
 #[tokio::test]
+async fn marking_favorite_racing_feed_deletion_is_not_a_server_error() {
+    let db = fresh_db().await;
+    // 存在確認を通過した直後に記事が消えると INSERT が FK 違反で 500 になる
+    // 実装では、競合が起きた周回でここが 500 になって落ちる (#152)。
+    for i in 0..30 {
+        let feed = seed_feed(&db, &format!("https://race.example/{i}/feed")).await;
+        let article = seed_article(&db, &feed, &format!("race-{i}"), 1).await;
+        let fav_url = server(&format!("/api/articles/{article}/favorite"));
+        let del_url = server(&format!("/api/feeds/{feed}"));
+        // favorite を先に投げ、削除をすぐ後ろに重ねる。競合しなかった周回は
+        // 204（favorite が先）か 404（削除が先）になり、次の周回で試す。
+        let (fav, del) = tokio::join!(
+            reqwest::Client::new().post(fav_url).send(),
+            reqwest::Client::new().delete(del_url).send(),
+        );
+        assert_eq!(del.expect("DELETE feed").status().as_u16(), 204);
+        assert_ne!(
+            fav.expect("POST favorite").status().as_u16(),
+            500,
+            "article deleted mid-request must be 404, not 500"
+        );
+    }
+}
+
+#[tokio::test]
 async fn article_list_reports_which_articles_are_favorites() {
     let db = fresh_db().await;
     let feed = seed_feed(&db, "https://a.example/feed").await;
