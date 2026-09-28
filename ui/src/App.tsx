@@ -112,9 +112,12 @@ export default function App() {
             return prev.filter((a) => a.id !== article.id)
           }
           if (!prev.some((a) => a.id === article.id)) {
-            // 一覧に無い行の追加は、応答待ちの間に別フィードへ切り替えた場合に
-            // 他フィードの記事を混入させる。解決時点の選択と一致する
-            // フィードの記事だけ足す。
+            // 一覧に無い行を足すのは、お気に入りのみ表示への切替えとトグル応答が
+            // 行き違った場合に限る。それ以外（未読のみ等の絞り込みで直近の再取得が
+            // 除外した行）は足さず、サーバの答えを残す。
+            if (!showFavoritesOnlyRef.current || !next) {
+              return prev
+            }
             if (selectedFeedIdRef.current !== null && article.feed_id !== selectedFeedIdRef.current) {
               return prev
             }
