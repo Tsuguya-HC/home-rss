@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Feed, Article } from './types'
 import { api } from './api'
 import { Sidebar } from './components/Sidebar'
@@ -44,13 +44,32 @@ export default function App() {
     setFeeds(feeds)
   }, [loadUnreadCounts])
 
+  // クリック時点の実表示を同刻に読むための ref。再取得がサーバーの
+  // 実データで作り直すので初期値は null のまま (#152)。
+  const favoriteToggleState = useRef<Set<string> | null>(null)
+  // 同じ記事へのトグル要求をクリック順に完了させる鎖の末尾 (#152)。
+  // 並列に投げると完了順がクリック順と入れ替わり、表示とサーバーの
+  // 実データが食い違ったまま固まる。鎖を抜ける経路は無いので
+  // 直列化が崩れることはない。
+  const favoriteToggleChains = useRef(new Map<string, Promise<void>>())
+  // 進行中の楽観更新を識別する記事ごとの世代 (#152)。新しいクリックの
+  // 楽観表示を古い失敗が巻き戻すことがないよう、末尾の世代だけが
+  // 画面を確定させる。
+  const favoriteToggleGenerations = useRef(new Map<string, number>())
+
   const loadArticles = useCallback(async () => {
     setLoadingArticles(true)
     try {
       const articles = await api.getArticles(selectedFeedId, showUnreadOnly, showFavoritesOnly)
       setArticles(articles)
       setReadIds(new Set())
-      setFavoriteIds(new Set(articles.filter((a) => a.is_favorite).map((a) => a.id)))
+      // 再取得はサーバーの実データを表示の正とするので
+      // 楽観中の ref も世代も捨てる (#152)。
+      favoriteToggleState.current = new Set(
+        articles.filter((a) => a.is_favorite).map((a) => a.id),
+      )
+      favoriteToggleGenerations.current.clear()
+      setFavoriteIds(new Set(favoriteToggleState.current))
     } finally {
       setLoadingArticles(false)
     }
@@ -92,43 +111,62 @@ export default function App() {
 
   const handleToggleFavorite = (article: Article) =>
     withError(async () => {
-      const isFavorite = favoriteIds.has(article.id)
-      setFavoriteIds((prev) => {
-        const next = new Set(prev)
-        if (isFavorite) {
-          next.delete(article.id)
-        } else {
-          next.add(article.id)
-        }
-        return next
-      })
-      try {
-        if (isFavorite) {
-          await api.unmarkFavorite(article.id)
-        } else {
-          await api.markFavorite(article.id)
-        }
-        setArticles((prev) =>
-          prev.map((a) => (a.id === article.id ? { ...a, is_favorite: !isFavorite } : a)),
-        )
-        setSelectedArticle((prev) =>
-          prev?.id === article.id ? { ...prev, is_favorite: !isFavorite } : prev,
-        )
-        if (showFavoritesOnly && isFavorite) {
-          setArticles((prev) => prev.filter((a) => a.id !== article.id))
-        }
-      } catch (e) {
-        setFavoriteIds((prev) => {
-          const next = new Set(prev)
-          if (isFavorite) {
-            next.add(article.id)
-          } else {
-            next.delete(article.id)
-          }
-          return next
-        })
-        throw e
+      // 連打では間に挟まる再レンダーが保証されないので、state ではなく
+      // 同刻に進む ref をそのクリック時点の実表示として読む (#152)。
+      const shownIds = favoriteToggleState.current ?? favoriteIds
+      const isFavorite = shownIds.has(article.id)
+      const generation = (favoriteToggleGenerations.current.get(article.id) ?? 0) + 1
+      favoriteToggleGenerations.current.set(article.id, generation)
+      const optimistic = new Set(shownIds)
+      if (isFavorite) {
+        optimistic.delete(article.id)
+      } else {
+        optimistic.add(article.id)
       }
+      favoriteToggleState.current = optimistic
+      setFavoriteIds(new Set(optimistic))
+      const tail = favoriteToggleChains.current.get(article.id) ?? Promise.resolve()
+      const turn = tail.then(async () => {
+        try {
+          if (isFavorite) {
+            await api.unmarkFavorite(article.id)
+          } else {
+            await api.markFavorite(article.id)
+          }
+          setArticles((prev) =>
+            prev.map((a) => (a.id === article.id ? { ...a, is_favorite: !isFavorite } : a)),
+          )
+          setSelectedArticle((prev) =>
+            prev?.id === article.id ? { ...prev, is_favorite: !isFavorite } : prev,
+          )
+          if (showFavoritesOnly && isFavorite) {
+            setArticles((prev) => prev.filter((a) => a.id !== article.id))
+          }
+        } catch (e) {
+          // 直列化で最新だけが残るので、巻き戻しは自分の世代が
+          // 末尾のときだけ行う (#152)。
+          if (favoriteToggleGenerations.current.get(article.id) === generation) {
+            const rolledBack = new Set(favoriteToggleState.current ?? favoriteIds)
+            if (isFavorite) {
+              rolledBack.add(article.id)
+            } else {
+              rolledBack.delete(article.id)
+            }
+            favoriteToggleState.current = rolledBack
+            setFavoriteIds(new Set(rolledBack))
+          }
+          throw e
+        }
+      })
+      // 失敗しても鎖だけは保つよう、末尾には解決だけ進める (#152)。
+      favoriteToggleChains.current.set(
+        article.id,
+        turn.then(
+          () => undefined,
+          () => undefined,
+        ),
+      )
+      await turn
     })
 
   const handleAddFeed = async (url: string) => {

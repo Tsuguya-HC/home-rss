@@ -319,11 +319,44 @@ async fn deleting_a_feed_removes_favorites_with_its_articles() {
 }
 
 #[tokio::test]
+async fn unmarking_one_favorite_keeps_other_favorites() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let first = seed_article(&db, &feed, "first", 1).await;
+    let second = seed_article(&db, &feed, "second", 1).await;
+    // 実 API 経由で両方に印を付け、片方だけ外す。unmark_favorite の
+    // WHERE 句が外れて全行削除になる変異だと second の印まで消える (#152)。
+    assert_eq!(post(&format!("/api/articles/{first}/favorite"), None).await, 204);
+    assert_eq!(post(&format!("/api/articles/{second}/favorite"), None).await, 204);
+    assert_eq!(delete(&format!("/api/articles/{first}/favorite")).await, 204);
+
+    let (_, favs) = get_json("/api/articles?favorite=true").await;
+    assert_eq!(titles(&favs), ["second"]);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 1);
+}
+
+#[tokio::test]
+async fn marking_one_favorite_does_not_favorite_other_articles() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let first = seed_article(&db, &feed, "first", 1).await;
+    seed_article(&db, &feed, "second", 1).await;
+    // 実 API 経由で 1 件だけ印を付ける。mark_favorite の INSERT ... SELECT の
+    // WHERE 句が外れて全行挿入になる変異だと second にも印が付く (#152)。
+    assert_eq!(post(&format!("/api/articles/{first}/favorite"), None).await, 204);
+
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 1);
+    let (_, favs) = get_json("/api/articles?favorite=true").await;
+    assert_eq!(titles(&favs), ["first"]);
+}
+
+#[tokio::test]
 async fn marking_favorite_with_malformed_uuid_is_a_server_error() {
     let _db = fresh_db().await;
     // 形式不正の UUID は記事の有無の問題ではなく DB 層での変換失敗なので、
-    // mark_read / delete_feed と同じく 500 になるべき。今の mark_favorite は
-    // article_exists の Err を 404 に丸めているのでここが 404 になって落ちる。
+    // mark_read / delete_feed と同じく 500 になるべき。mark_favorite の
+    // 404 への写しは INSERT 失敗時の 23503 だけに絞っており、変換失敗は
+    // そのまま 500 になる (#152)。
     assert_eq!(post("/api/articles/abc/favorite", None).await, 500);
 }
 
