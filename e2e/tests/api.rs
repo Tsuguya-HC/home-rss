@@ -224,7 +224,7 @@ async fn cleaner_deletes_only_read_articles_past_retention() {
 // 存在チェック無しの INSERT（未知 id で FK 違反の 500 になる）、
 // DELETE の affected 行数を見ない実装（未知 id の解除が 204 になる）。
 // エンドポイントの形（POST でマーク、DELETE で解除）は #152 の要求からは
-// 決まらない実装判断で、tests-report.md に申し送ってある。
+// 決まらない実装判断（read_status の POST /api/articles/{id}/read と同じ形）。
 #[tokio::test]
 async fn marking_favorite_is_idempotent_both_ways_and_404_for_unknown() {
     let db = fresh_db().await;
@@ -327,6 +327,88 @@ async fn cleaner_keeps_favorites_read_or_not() {
     assert_eq!(resp.status().as_u16(), 200);
     let (_, left) = get_json("/api/articles").await;
     assert_eq!(titles(&left), ["fav-unread"]);
+}
+
+// --- #152 差し戻し (PR #179 仕分け 1): mark_favorite の TOCTOU ---
+//
+// 捕まえる欠陥: mark_favorite は存在チェック (article_missing) と INSERT を
+// 別文で実行する。チェックが通った直後に記事が消えると INSERT が FK 違反で
+// Err になり、handle() が 500 にマップする。issue #152 が要求するのは 404。
+// 決定的な再現: 別コネクションのトランザクションで記事行を FOR UPDATE し、
+// POST /favorite の INSERT を FK 検査でブロックさせた状態で、その
+// トランザクション内で記事を DELETE→COMMIT する。待たされていた INSERT は
+// 参照行の削除で FK 違反になる（PostgreSQL は待ちの後に存在を再検査せず
+// エラーにする）のが現在の振る舞いで、500 ではなく 404 が要求される。
+#[tokio::test]
+async fn marking_favorite_while_article_is_deleted_returns_404_not_500() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "one", 1).await;
+
+    // 記事行を別トランザクションでロックする。サーバーの INSERT INTO favorites は
+    // 参照行への KeyShare 取得でこのロックにブロックされる。
+    let (lock_client, lock_conn) = tokio_postgres::connect(&env("E2E_DATABASE_URL"), NoTls)
+        .await
+        .expect("second connection for row lock");
+    tokio::spawn(async move {
+        lock_conn.await.expect("lock connection");
+    });
+    lock_client
+        .batch_execute("BEGIN")
+        .await
+        .expect("begin lock transaction");
+    lock_client
+        .query(
+            "SELECT 1 FROM articles WHERE id = $1::text::uuid FOR UPDATE",
+            &[&article],
+        )
+        .await
+        .expect("lock article row");
+
+    let fav_url = server(&format!("/api/articles/{article}/favorite"));
+    let post = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(fav_url)
+            .send()
+            .await
+            .expect("POST favorite")
+            .status()
+            .as_u16()
+    });
+
+    // INSERT がロック待ちに入ったことを確認してから競合させる（sleep 固定にしない）。
+    // ポーリング文自体にその文字列を含めると自分がヒットするため、
+    // pid <> pg_backend_pid() で自分を除外し、パターンは分割して組み立てる。
+    let mut waited = false;
+    for _ in 0..100 {
+        let pattern = ["%INTO fav", "orites%"].concat();
+        let m: i64 = db
+            .query_one(
+                "SELECT COUNT(*) FROM pg_stat_activity \
+                 WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE $1",
+                &[&pattern],
+            )
+            .await
+            .expect("poll lock waiters")
+            .get(0);
+        if m > 0 {
+            waited = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(waited, "server INSERT did not block on the article row lock");
+
+    lock_client
+        .execute(
+            "DELETE FROM articles WHERE id = $1::text::uuid",
+            &[&article],
+        )
+        .await
+        .expect("delete article under lock");
+    lock_client.batch_execute("COMMIT").await.expect("commit delete");
+
+    assert_eq!(post.await.expect("POST task"), 404);
 }
 
 // 捕まえる変異: favorites に ON DELETE CASCADE が無い実装

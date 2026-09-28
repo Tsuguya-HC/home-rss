@@ -299,14 +299,21 @@ async fn mark_read(id: &str) -> Result<Resp> {
 
 async fn mark_favorite(id: &str) -> Result<Resp> {
     let conn = db::connect().await?;
-    if article_missing(&conn, id).await? {
+    // 存在確認と書き込みを 1 文に畳んである。別文に分けると、チェック通過後に
+    // 記事が消えた場合 INSERT が FK 違反で 500 になる (#152 の 404 要求に反する)。
+    // 0 行時は既にお気に入り済みか記事が無いかのどちらかなので、追って存在を
+    // 確かめて 204 / 404 を分ける。
+    let inserted = conn
+        .execute(
+            "INSERT INTO favorites (article_id) \
+             SELECT id FROM articles WHERE id = $1 FOR UPDATE \
+             ON CONFLICT DO NOTHING",
+            vec![ParameterValue::Uuid(id.to_owned())],
+        )
+        .await?;
+    if inserted == 0 && article_missing(&conn, id).await? {
         return Ok(error_response(StatusCode::NOT_FOUND, "article not found"));
     }
-    conn.execute(
-        "INSERT INTO favorites (article_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        vec![ParameterValue::Uuid(id.to_owned())],
-    )
-    .await?;
 
     Ok(empty(StatusCode::NO_CONTENT))
 }

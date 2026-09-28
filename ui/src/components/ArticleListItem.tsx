@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Article } from '../types'
 import { formatDate } from '../lib/date'
+import { FavoriteButton } from './FavoriteButton'
 
 interface ArticleListItemProps {
   article: Article
@@ -27,19 +28,15 @@ export function ArticleListItem({ article, isSelected, favoritePending, onClick,
     >
       <div className="article-item-body">
         <div className="article-item-title">
-          <button
-            type="button"
-            className={`favorite-star${article.favorite ? ' favorite-star--active' : ''}`}
-            aria-label={article.favorite ? 'お気に入りを解除' : 'お気に入りに追加'}
-            aria-pressed={article.favorite}
-            disabled={favoritePending}
-            onClick={(e) => {
+          <FavoriteButton
+            favorite={article.favorite}
+            pending={favoritePending}
+            label={article.favorite ? '★' : '☆'}
+            onToggle={(e) => {
               e.stopPropagation()
               onToggleFavorite()
             }}
-          >
-            {article.favorite ? '★' : '☆'}
-          </button>
+          />
           {article.title}
         </div>
         {date && <div className="article-item-date">{date}</div>}

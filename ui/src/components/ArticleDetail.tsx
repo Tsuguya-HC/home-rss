@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify'
 import { Article } from '../types'
 import { formatDateTime } from '../lib/date'
+import { FavoriteButton } from './FavoriteButton'
 
 interface ArticleDetailProps {
   article: Article
@@ -18,16 +19,12 @@ export function ArticleDetail({ article, favoritePending, onToggleFavorite, onBa
         <button className="btn-icon back-btn mobile-back-btn" onClick={onBack} title="戻る">
           ←
         </button>
-        <button
-          type="button"
-          className={`favorite-star${article.favorite ? ' favorite-star--active' : ''}`}
-          aria-label={article.favorite ? 'お気に入りを解除' : 'お気に入りに追加'}
-          aria-pressed={article.favorite}
-          disabled={favoritePending}
-          onClick={onToggleFavorite}
-        >
-          {article.favorite ? '★ お気に入り' : '☆ お気に入り'}
-        </button>
+        <FavoriteButton
+          favorite={article.favorite}
+          pending={favoritePending}
+          label={article.favorite ? '★ お気に入り' : '☆ お気に入り'}
+          onToggle={onToggleFavorite}
+        />
         <a
           href={article.url}
           target="_blank"

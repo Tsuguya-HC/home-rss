@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Feed, Article } from './types'
 import { api } from './api'
 import { Sidebar } from './components/Sidebar'
@@ -15,6 +15,13 @@ export default function App() {
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null)
   const [showUnreadOnly, setShowUnreadOnly] = useState(true)
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false)
+  // トグル応答の解決時点の絞り込み状態と選択フィードを見る。呼び出し時の
+  // 値を掴むと、応答待ちの間にフィルタやフィードが変わった場合に一覧と
+  // サーバがずれる。
+  const showFavoritesOnlyRef = useRef(showFavoritesOnly)
+  showFavoritesOnlyRef.current = showFavoritesOnly
+  const selectedFeedIdRef = useRef(selectedFeedId)
+  selectedFeedIdRef.current = selectedFeedId
   const [readIds, setReadIds] = useState<Set<string>>(new Set())
   const [pendingFavoriteIds, setPendingFavoriteIds] = useState<Set<string>>(new Set())
   const [mobileView, setMobileView] = useState<MobileView>('list')
@@ -100,11 +107,21 @@ export default function App() {
           await api.markFavorite(article.id)
         }
         const next = !article.favorite
-        setArticles((prev) =>
-          showFavoritesOnly && !next
-            ? prev.filter((a) => a.id !== article.id)
-            : prev.map((a) => (a.id === article.id ? { ...a, favorite: next } : a)),
-        )
+        setArticles((prev) => {
+          if (showFavoritesOnlyRef.current && !next) {
+            return prev.filter((a) => a.id !== article.id)
+          }
+          if (!prev.some((a) => a.id === article.id)) {
+            // 一覧に無い行の追加は、応答待ちの間に別フィードへ切り替えた場合に
+            // 他フィードの記事を混入させる。解決時点の選択と一致する
+            // フィードの記事だけ足す。
+            if (selectedFeedIdRef.current !== null && article.feed_id !== selectedFeedIdRef.current) {
+              return prev
+            }
+            return [{ ...article, favorite: next }, ...prev]
+          }
+          return prev.map((a) => (a.id === article.id ? { ...a, favorite: next } : a))
+        })
         setSelectedArticle((prev) =>
           prev && prev.id === article.id ? { ...prev, favorite: next } : prev,
         )
