@@ -72,9 +72,20 @@ jobs:
           version: v${{ env.SPIN_CLI_VERSION }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install UI dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      # リリースはマージ前にこの leaf の検証呼び出しを通った commit から作るので、
+      # テストは検証呼び出しでだけ回す。
+      - name: Test UI
+        if: ${{ !inputs.publish }}
+        working-directory: ui
+        run: pnpm run test
+
       - name: Build UI
         working-directory: ui
-        run: pnpm install --frozen-lockfile && pnpm run build
+        run: pnpm run build
 
       - name: Log in to GHCR
         if: ${{ inputs.publish }}

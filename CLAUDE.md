@@ -110,6 +110,16 @@ E2E_DATABASE_URL="postgres://postgres:e2e@${IP}:5432/rss?sslmode=disable" e2e/ru
 - DB を渡さなければ失敗する。skip はしない
 - シナリオは HTTP を叩き、データは DB に直接入れる。外部のフィードは取得しない
 
+### UI のテスト
+
+```bash
+cd ui && pnpm test
+```
+
+- vitest + jsdom + Testing Library。テストは対象の隣に `*.test.ts(x)` で置く
+- API は `fetch` をモックして応答を返す。応答の順番やタイミングを確かめるときは、
+  Promise を手で解決して順番を決める（実時間の待ちに頼らない）
+
 ### 並列開発
 
 worktree を切って server/ui/fetcher/cleaner を並列セッションで開発可能。
