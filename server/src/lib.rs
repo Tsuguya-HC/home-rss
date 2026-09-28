@@ -211,15 +211,15 @@ async fn add_feed_in_transaction(
             vec![ParameterValue::Str(url.to_string())],
         )
         .await
-        .map_err(|e| AddFeedError::Db(anyhow::anyhow!(e)))?
+        .map_err(anyhow::Error::from)?
         .collect()
         .await
-        .map_err(|e| AddFeedError::Db(anyhow::anyhow!(e)))?;
+        .map_err(anyhow::Error::from)?;
 
     let Some(row) = rows.first() else {
-        return Err(AddFeedError::Db(anyhow::anyhow!("failed to insert feed")));
+        return Err(anyhow::anyhow!("failed to insert feed").into());
     };
-    let feed = row_to_feed(row).map_err(AddFeedError::Db)?;
+    let feed = row_to_feed(row)?;
     match immediate_fetch(conn, &feed).await {
         outcome @ ImmediateFetchOutcome::Fetched(_) => Ok(outcome),
         outcome => Err(AddFeedError::Outcome(outcome)),

@@ -189,18 +189,57 @@ async fn adding_a_feed_rejects_urls_the_fetcher_must_not_reach() {
 #[tokio::test]
 async fn adding_a_feed_whose_first_fetch_fails_leaves_no_feed_row() {
     let db = fresh_db().await;
-    // `.invalid` は決して解決されない (RFC 2606) ので、SSRF ガードは通るが
-    // その場の取得は失敗する。「取得はするが失敗する」経路で、取得前に弾く
-    // 上のガードのテストとは別物。
+    // `.invalid` never resolves (RFC 2606), so the SSRF guard passes but
+    // the immediate fetch itself fails. This exercises the "fetch is
+    // attempted but fails" path, unlike the guard test above which is
+    // rejected before any fetch.
     let body = r#"{"url":"https://no-such-feed.invalid/feed"}"#;
     assert_eq!(post("/api/feeds", Some(body)).await, 502);
     assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
     assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
-    // 失敗した追加が残骸を残すと、同じ URL の再追加がそれに引きずられる。
-    // 再試行も同じく失敗応答で、やはり何も残さない。
+    // A failed add that left a row behind would drag the retry of the same
+    // URL along with it. The retry fails the same way and still leaves
+    // nothing behind.
     assert_eq!(post("/api/feeds", Some(body)).await, 502);
     assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
     assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
+}
+
+#[tokio::test]
+async fn readding_a_failing_feed_leaves_the_registered_row_unchanged() {
+    let db = fresh_db().await;
+    // Start from a registered row that already carries stored metadata, the way
+    // a previously successful add would have left it.
+    let url = "https://no-such-feed.invalid/feed";
+    let feed = seed_feed(&db, url).await;
+    db.execute(
+        "UPDATE feeds SET title = 'Existing Title', etag = 'existing-etag' \
+         WHERE id = $1::text::uuid",
+        &[&feed],
+    )
+    .await
+    .expect("set existing metadata");
+
+    // The immediate fetch still fails, so the re-add is reported as an error.
+    // `.invalid` never resolves (RFC 2606), so the SSRF guard passes but the
+    // fetch itself fails, the same failing-fetch path as the test above.
+    let body = r#"{"url":"https://no-such-feed.invalid/feed"}"#;
+    assert_eq!(post("/api/feeds", Some(body)).await, 502);
+
+    // The registered row must be unchanged: the failed re-add neither removes
+    // it nor clears its stored metadata. Catches an upsert that resets columns
+    // (e.g. `title = NULL, etag = NULL`) on conflict.
+    let row = db
+        .query_one("SELECT url, title, etag FROM feeds", &[])
+        .await
+        .expect("read feed row");
+    let stored_url: String = row.get(0);
+    let title: Option<String> = row.get(1);
+    let etag: Option<String> = row.get(2);
+    assert_eq!(stored_url, url);
+    assert_eq!(title.as_deref(), Some("Existing Title"));
+    assert_eq!(etag.as_deref(), Some("existing-etag"));
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 1);
 }
 
 #[tokio::test]

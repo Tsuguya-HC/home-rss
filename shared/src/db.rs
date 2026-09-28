@@ -56,13 +56,13 @@ async fn rollback(conn: &Connection) -> Result<()> {
 /// 返す。ROLLBACK の成否によらず元のエラーは失わない（ROLLBACK の失敗は
 /// eprintln に留め、呼び出し元が受け取る応答は `f` の失敗のままにする）。
 /// `f` は `&Connection` を受け取るクロージャで、既存の `conn: &Connection`
-/// を取る書き込み関数をそのまま呼べる。共有ライブラリ側に置くのは、この
-/// リポジトリの書き込みはどれもここを通すため (#148)。
+/// を取る書き込み関数をそのまま呼べる。`add_feed` の書き込みはここを通す
+/// (#148)。他の書き込みもここを通す想定だが、まだ移していない。
 pub async fn in_transaction<'a, T, E, F, Fut>(conn: &'a Connection, f: F) -> Result<T, E>
 where
     F: FnOnce(&'a Connection) -> Fut,
     Fut: Future<Output = Result<T, E>> + 'a,
-    E: From<anyhow::Error> + std::fmt::Display,
+    E: From<anyhow::Error>,
 {
     begin(conn).await?;
     match f(conn).await {
