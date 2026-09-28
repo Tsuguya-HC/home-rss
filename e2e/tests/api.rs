@@ -59,6 +59,24 @@ async fn count(db: &Client, sql: &str) -> i64 {
     db.query_one(sql, &[]).await.expect(sql).get(0)
 }
 
+async fn mark_favorite_in_db(db: &Client, article_id: &str) {
+    db.execute(
+        "INSERT INTO favorites (article_id) VALUES ($1::text::uuid)",
+        &[&article_id],
+    )
+    .await
+    .expect("insert favorites");
+}
+
+async fn run_cleaner() {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/clean", env("E2E_CLEANER_URL")))
+        .send()
+        .await
+        .expect("POST /clean");
+    assert_eq!(resp.status().as_u16(), 200);
+}
+
 fn server(path: &str) -> String {
     format!("{}{path}", env("E2E_SERVER_URL"))
 }
@@ -207,4 +225,126 @@ async fn cleaner_deletes_only_read_articles_past_retention() {
 
     let (_, left) = get_json("/api/articles").await;
     assert_eq!(titles(&left), ["old-unread", "recent-read"]);
+}
+
+#[tokio::test]
+async fn marking_favorite_is_idempotent_and_unmarking_removes_it() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "fav", 1).await;
+
+    // ON CONFLICT が無いと 2 回目の mark が主キー違反で落ちる。
+    assert_eq!(post(&format!("/api/articles/{article}/favorite"), None).await, 204);
+    assert_eq!(post(&format!("/api/articles/{article}/favorite"), None).await, 204);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 1);
+
+    let (_, only_favs) = get_json("/api/articles?favorite=true").await;
+    assert_eq!(titles(&only_favs), ["fav"]);
+
+    // 印が無い削除で 404 を返す書き方だと 2 回目の unmark で落ちる。
+    assert_eq!(delete(&format!("/api/articles/{article}/favorite")).await, 204);
+    assert_eq!(delete(&format!("/api/articles/{article}/favorite")).await, 204);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 0);
+
+    let (_, no_favs) = get_json("/api/articles?favorite=true").await;
+    assert_eq!(titles(&no_favs), Vec::<&str>::new());
+
+    // INSERT ... ON CONFLICT DO NOTHING は存在しない article_id の FK 違反を
+    // 吸収しないので、存在確認を挟まない実装ではここが 500 になる (#152)。
+    let missing = "00000000-0000-0000-0000-000000000000";
+    assert_eq!(post(&format!("/api/articles/{missing}/favorite"), None).await, 404);
+}
+
+#[tokio::test]
+async fn favorites_only_filter_combines_with_feed_and_unread() {
+    let db = fresh_db().await;
+    let a = seed_feed(&db, "https://a.example/feed").await;
+    let b = seed_feed(&db, "https://b.example/feed").await;
+    let a_fav_read = seed_article(&db, &a, "a-fav-read", 1).await;
+    let a_fav_unread = seed_article(&db, &a, "a-fav-unread", 1).await;
+    seed_article(&db, &a, "a-plain-unread", 1).await;
+    let b_fav_unread = seed_article(&db, &b, "b-fav-unread", 1).await;
+    mark_read_in_db(&db, &a_fav_read).await;
+    mark_favorite_in_db(&db, &a_fav_read).await;
+    mark_favorite_in_db(&db, &a_fav_unread).await;
+    mark_favorite_in_db(&db, &b_fav_unread).await;
+
+    let (_, favs) = get_json("/api/articles?favorite=true").await;
+    assert_eq!(titles(&favs), ["a-fav-read", "a-fav-unread", "b-fav-unread"]);
+
+    let (_, favs_of_a) = get_json(&format!("/api/articles?feed_id={a}&favorite=true")).await;
+    assert_eq!(titles(&favs_of_a), ["a-fav-read", "a-fav-unread"]);
+
+    // favorite の絞り込みが unread と独立でない（unread 側で除外を忘れた）
+    // 実装だとここが 3 件になる。
+    let (_, fav_unread) = get_json("/api/articles?favorite=true&unread=true").await;
+    assert_eq!(titles(&fav_unread), ["a-fav-unread", "b-fav-unread"]);
+
+    let (_, fav_unread_of_a) =
+        get_json(&format!("/api/articles?feed_id={a}&favorite=true&unread=true")).await;
+    assert_eq!(titles(&fav_unread_of_a), ["a-fav-unread"]);
+}
+
+#[tokio::test]
+async fn cleaner_keeps_favorites_and_unmarking_makes_them_eligible_again() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    // 15 days is past the e2e retention (10), matching the existing cleaner test.
+    let fav_read = seed_article(&db, &feed, "fav-read", 15).await;
+    let fav_unread = seed_article(&db, &feed, "fav-unread", 15).await;
+    let plain_read = seed_article(&db, &feed, "plain-read", 15).await;
+    mark_read_in_db(&db, &fav_read).await;
+    mark_read_in_db(&db, &plain_read).await;
+    mark_favorite_in_db(&db, &fav_read).await;
+    mark_favorite_in_db(&db, &fav_unread).await;
+
+    // favorites 除外の無い削除 SQL では fav-read が消えて old 相当だけ残る。
+    run_cleaner().await;
+    let (_, left) = get_json("/api/articles").await;
+    assert_eq!(titles(&left), ["fav-read", "fav-unread"]);
+
+    // unmark 後も除外条件が残る書き方だと 2 回目でも消えない。
+    assert_eq!(delete(&format!("/api/articles/{fav_read}/favorite")).await, 204);
+    run_cleaner().await;
+    let (_, left_again) = get_json("/api/articles").await;
+    assert_eq!(titles(&left_again), ["fav-unread"]);
+}
+
+#[tokio::test]
+async fn deleting_a_feed_removes_favorites_with_its_articles() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let article = seed_article(&db, &feed, "one", 1).await;
+    mark_favorite_in_db(&db, &article).await;
+
+    // ON DELETE CASCADE が無いとここで favorites 行が孤児として残る。
+    assert_eq!(delete(&format!("/api/feeds/{feed}")).await, 204);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM favorites").await, 0);
+}
+
+#[tokio::test]
+async fn article_list_reports_which_articles_are_favorites() {
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    let fav = seed_article(&db, &feed, "fav", 1).await;
+    seed_article(&db, &feed, "plain", 1).await;
+    mark_favorite_in_db(&db, &fav).await;
+
+    // EXISTS 式を忘れて常に false を返す実装だと、印の表示もお気に入りのみの
+    // 絞り込み後の表示もずれる。
+    let (_, body) = get_json("/api/articles").await;
+    let flags: Vec<(&str, bool)> = body
+        .as_array()
+        .expect("array of articles")
+        .iter()
+        .map(|a| {
+            (
+                a["title"].as_str().expect("title"),
+                a["is_favorite"].as_bool().expect("is_favorite"),
+            )
+        })
+        .collect();
+    assert!(flags.contains(&("fav", true)), "{flags:?}");
+    assert!(flags.contains(&("plain", false)), "{flags:?}");
 }

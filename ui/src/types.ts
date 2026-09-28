@@ -19,6 +19,7 @@ export interface Article {
   published_at: number | null
   fetched_at: number | null
   image_url: string | null
+  is_favorite: boolean
 }
 
 export interface Stats {

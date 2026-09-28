@@ -38,6 +38,7 @@ pub struct Article {
     pub published_at: Option<i64>,
     pub fetched_at: Option<i64>,
     pub image_url: Option<String>,
+    pub is_favorite: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
