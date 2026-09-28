@@ -227,8 +227,9 @@ async fn readding_a_failing_feed_leaves_the_registered_row_unchanged() {
     assert_eq!(post("/api/feeds", Some(body)).await, 502);
 
     // The registered row must be unchanged: the failed re-add neither removes
-    // it nor clears its stored metadata. Catches an upsert that resets columns
-    // (e.g. `title = NULL, etag = NULL`) on conflict.
+    // it nor clears its stored metadata. Catches failure handling that touches
+    // the row outside the transaction (e.g. `DELETE FROM feeds WHERE url = $1`
+    // after the rollback).
     let row = db
         .query_one("SELECT url, title, etag FROM feeds", &[])
         .await
