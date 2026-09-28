@@ -83,6 +83,7 @@ jobs:
               - 'shared/**'
               - 'migrations/**'
               - 'e2e/**'
+              - 'scripts/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
