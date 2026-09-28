@@ -15,9 +15,9 @@ Spin (WebAssembly) で構築するカスタム RSS リーダー。SpinKube 経�
 | サービス | trigger | 役割 | K8s リソース |
 |---------|---------|------|-------------|
 | server | http | REST API | SpinApp |
-| ui | http | Web UI (HTMX) | SpinApp |
-| fetcher | command | フィード収集 | CronJob |
-| cleaner | command | 古い記事削除 | CronJob |
+| ui | http | Web UI (React) | SpinApp |
+| fetcher | http (`POST /fetch`) | フィード収集 | SpinApp + CronWorkflow |
+| cleaner | http (`POST /clean`) | 古い記事削除 | SpinApp + CronWorkflow |
 
 ## 開発
 
@@ -28,5 +28,5 @@ cargo build --target wasm32-wasip1 --release
 # 個別サービスのビルド + 起動
 cd server && spin build && spin up
 cd ui && spin build && spin up
-cd fetcher && spin build && spin up  # 即時実行して終了
+cd fetcher && spin build && spin up  # 別の端末から curl -X POST localhost:3000/fetch で 1 回取得
 ```

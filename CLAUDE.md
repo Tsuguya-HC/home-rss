@@ -5,13 +5,13 @@ Spin (WebAssembly) で構築するカスタム RSS リーダー。SpinKube 経�
 ## アーキテクチャ
 
 ```
-                   ┌─ CronJob (15-30min) ─── fetcher (command trigger) ──┐
-                   │                                  │                   │
-                   │                            外部フィード (HTTPS)      │
-                   │                                  │                   │
-rss.infra.tgy.io → oauth2-proxy → server (http trigger) ─── API ────────├── shared-pg
-                                   ui (http trigger) ─── 静的ファイル     │
-                   └─ CronJob (daily) ──── cleaner (command trigger) ────┘
+                   ┌─ CronWorkflow ─ POST /fetch ─ fetcher (http trigger) ──┐
+                   │                                   │                    │
+                   │                             外部フィード (HTTPS)       │
+                   │                                   │                    │
+rss.infra.tgy.io → oauth2-proxy → server (http trigger) ─── API ──────────├── rss-pg
+                                   ui (http trigger) ─── 静的ファイル       │
+                   └─ CronWorkflow ─ POST /clean ─ cleaner (http trigger) ──┘
 ```
 
 **server と fetcher の両方が外部フィードを取りに行く。** フィード追加 (`POST /api/feeds`) は
@@ -29,8 +29,8 @@ ETag / Last-Modified の扱いが既に乖離していた。
 |---------|---------|------|-------------|-------------|
 | server | http | REST API + フィード追加時の即時取得 | SpinApp | `ghcr.io/tsuguya-hc/home-rss-server` |
 | ui | http | Web UI (React SPA) + 静的ファイル (spin-fileserver) | SpinApp | `ghcr.io/tsuguya-hc/home-rss-ui` |
-| fetcher | command | フィード収集 → DB 書き込み | CronJob | `ghcr.io/tsuguya-hc/home-rss-fetcher` |
-| cleaner | command | 古い記事の削除 | CronJob | `ghcr.io/tsuguya-hc/home-rss-cleaner` |
+| fetcher | http (`POST /fetch`) | フィード収集 → DB 書き込み | SpinApp + CronWorkflow | `ghcr.io/tsuguya-hc/home-rss-fetcher` |
+| cleaner | http (`POST /clean`) | 古い記事の削除 | SpinApp + CronWorkflow | `ghcr.io/tsuguya-hc/home-rss-cleaner` |
 
 ## リポジトリ構成
 
@@ -38,8 +38,8 @@ ETag / Last-Modified の扱いが既に乖離していた。
 home-rss/
 ├── server/           # REST API (http trigger)
 ├── ui/               # Web UI (React + Vite + TypeScript, pnpm)。ビルド成果物を spin-fileserver が配信
-├── fetcher/          # フィード収集 (command trigger)
-├── cleaner/          # 古い記事削除 (command trigger)
+├── fetcher/          # フィード収集 (http trigger、POST /fetch)
+├── cleaner/          # 古い記事削除 (http trigger、POST /clean)
 ├── shared/           # 共有ライブラリ (DB モデル、型定義、取得+保存、SSRF ガード)
 ├── migrations/       # SQL マイグレーション
 ├── docs/             # network-access.md: CNP と外部アクセス / spec.md: アプリが今どう動くかと守るべき性質
@@ -71,7 +71,7 @@ Cargo workspace で `shared` クレートを共有。各サービスは独立し
 
 ```bash
 cd server && spin build && spin up
-cd fetcher && spin build && spin up  # 即時実行して終了
+cd fetcher && spin build && spin up  # 別の端末から curl -X POST localhost:3000/fetch で 1 回取得
 ```
 
 ### ビルド
@@ -139,7 +139,7 @@ worktree を切って server/ui/fetcher/cleaner を並列セッションで開�
 
 ## 関連リポジトリ
 
-- **home-cluster**: K8s マニフェスト (SpinApp, CronJob, CNP, oauth2-proxy, OnePasswordItem)
+- **home-cluster**: K8s マニフェスト (SpinApp, CronWorkflow, CNP, oauth2-proxy, OnePasswordItem)
 - **home-infra**: Talos 設定 (containerd-shim-spin 拡張は Talos イメージに組み込み済み)
 - **home-cloudflare**: DNS / Tunnel (rss.infra.tgy.io)
 
@@ -180,7 +180,8 @@ doc コメント（`///`）も同じ。
 ## 注意事項
 
 - **PUBLIC リポジトリ** — 機密値を絶対にコミットしない
-- Spin の cron trigger は SpinKube 非対応 → command trigger + K8s CronJob を使う
+- Spin の cron trigger は SpinKube 非対応 → fetcher / cleaner は http trigger にして、home-cluster の
+  Argo CronWorkflow が定期的に POST する（周期と重複実行の禁止は home-cluster 側が持つ）
 - **フィード取得は HTTPS のみ**。`fetcher/spin.toml` / `server/spin.toml` の
   `allowed_outbound_hosts` に `http://*:80` を戻しても、home-cluster の CNP が world:443 しか
   開けていないので平文フィードは失敗ではなくハングする。開けるなら両方を揃えて直すこと。
