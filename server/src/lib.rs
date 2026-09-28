@@ -161,6 +161,46 @@ async fn add_feed(req: Request) -> Result<Resp> {
     };
 
     let conn = db::connect().await?;
+    match db::in_transaction(&conn, |conn| add_feed_in_transaction(conn, url.as_str())).await {
+        Ok(outcome) => Ok(immediate_fetch_response(&outcome)),
+        Err(AddFeedError::Outcome(outcome)) => Ok(immediate_fetch_response(&outcome)),
+        Err(AddFeedError::Db(e)) => Err(e),
+    }
+}
+
+/// `POST /api/feeds` の DB 書き込み (`in_transaction` の内側で呼ぶ)。
+/// feeds の INSERT〜即時取得〜記事保存をひとつのトランザクションに括り、
+/// 即時取得が失敗したら INSERT ごと巻き戻す (#148)。既存 URL の再追加は
+/// INSERT 自体が何も変えない (ON CONFLICT は url への自己代入のみ) ため、
+/// 取得失敗時の巻き戻しでも既存行を壊さない。
+#[derive(Debug)]
+enum AddFeedError {
+    /// 即時取得が失敗した (ユーザーに失敗として伝える応答)。INSERT は既に
+    /// ROLLBACK 済みなので、呼び出し元は行を消す必要が無い。
+    Outcome(ImmediateFetchOutcome),
+    /// INSERT/デコード/COMMIT 等の DB 側の失敗 (500 として伝える)。
+    Db(anyhow::Error),
+}
+
+impl std::fmt::Display for AddFeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AddFeedError::Outcome(outcome) => write!(f, "immediate fetch failed: {outcome:?}"),
+            AddFeedError::Db(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl From<anyhow::Error> for AddFeedError {
+    fn from(e: anyhow::Error) -> Self {
+        AddFeedError::Db(e)
+    }
+}
+
+async fn add_feed_in_transaction(
+    conn: &spin_sdk::pg::Connection,
+    url: &str,
+) -> std::result::Result<ImmediateFetchOutcome, AddFeedError> {
     let rows = conn
         .query(
             "INSERT INTO feeds (url) VALUES ($1) \
@@ -170,20 +210,19 @@ async fn add_feed(req: Request) -> Result<Resp> {
              EXTRACT(EPOCH FROM created_at)::bigint",
             vec![ParameterValue::Str(url.to_string())],
         )
-        .await?
+        .await
+        .map_err(|e| AddFeedError::Db(anyhow::anyhow!(e)))?
         .collect()
-        .await?;
+        .await
+        .map_err(|e| AddFeedError::Db(anyhow::anyhow!(e)))?;
 
-    match rows.first() {
-        Some(row) => {
-            let feed = row_to_feed(row)?;
-            let outcome = immediate_fetch(&conn, &feed).await;
-            Ok(immediate_fetch_response(&outcome))
-        }
-        None => Ok(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to insert feed",
-        )),
+    let Some(row) = rows.first() else {
+        return Err(AddFeedError::Db(anyhow::anyhow!("failed to insert feed")));
+    };
+    let feed = row_to_feed(row).map_err(AddFeedError::Db)?;
+    match immediate_fetch(conn, &feed).await {
+        outcome @ ImmediateFetchOutcome::Fetched(_) => Ok(outcome),
+        outcome => Err(AddFeedError::Outcome(outcome)),
     }
 }
 
@@ -199,7 +238,8 @@ const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// フィード追加直後の即時取得 (#106)。取得〜保存の実処理は
 /// home_rss_shared::fetch::fetch_and_store に一本化されており、定期取得
-/// (fetcher) と同じコードを通る。失敗しても追加自体は残す。
+/// (fetcher) と同じコードを通る。失敗時は `add_feed_in_transaction` が
+/// `AddFeedError::Outcome` として返し、INSERT ごと巻き戻す (#148)。
 async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> ImmediateFetchOutcome {
     match fetch_and_store(conn, &feed.id, &feed.url, None, None, Some(FETCH_TIMEOUT)).await {
         FetchAndStoreOutcome::Stored(updated) => ImmediateFetchOutcome::Fetched(updated),

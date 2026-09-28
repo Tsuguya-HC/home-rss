@@ -187,6 +187,23 @@ async fn adding_a_feed_rejects_urls_the_fetcher_must_not_reach() {
 }
 
 #[tokio::test]
+async fn adding_a_feed_whose_first_fetch_fails_leaves_no_feed_row() {
+    let db = fresh_db().await;
+    // `.invalid` は決して解決されない (RFC 2606) ので、SSRF ガードは通るが
+    // その場の取得は失敗する。「取得はするが失敗する」経路で、取得前に弾く
+    // 上のガードのテストとは別物。
+    let body = r#"{"url":"https://no-such-feed.invalid/feed"}"#;
+    assert_eq!(post("/api/feeds", Some(body)).await, 502);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
+    // 失敗した追加が残骸を残すと、同じ URL の再追加がそれに引きずられる。
+    // 再試行も同じく失敗応答で、やはり何も残さない。
+    assert_eq!(post("/api/feeds", Some(body)).await, 502);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
+}
+
+#[tokio::test]
 async fn cleaner_deletes_only_read_articles_past_retention() {
     let db = fresh_db().await;
     let feed = seed_feed(&db, "https://a.example/feed").await;
