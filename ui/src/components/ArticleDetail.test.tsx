@@ -25,7 +25,7 @@ function metaSpanCount(container: HTMLElement): number {
 }
 
 describe('ArticleDetail', () => {
-  // 捕まえる変異: 02-article-content (content の三項の反転)、元記事リンクの target/rel の削除
+  // 捕まえる変異: content の三項の反転、元記事リンクの target/rel の削除
   it('renders title, author, date, content, and a link to the source', () => {
     const { container } = render(<ArticleDetail article={baseArticle} onBack={vi.fn()} />)
 
@@ -42,7 +42,7 @@ describe('ArticleDetail', () => {
     expect(links[0].getAttribute('rel')).toBe('noopener noreferrer')
   })
 
-  // 捕まえる変異: 01-article-author (author の条件の削除)
+  // 捕まえる変異: author の条件の削除
   it('omits the author span when author is null', () => {
     const { container } = render(
       <ArticleDetail article={{ ...baseArticle, author: null }} onBack={vi.fn()} />,
@@ -54,7 +54,7 @@ describe('ArticleDetail', () => {
     expect(metaSpanCount(container)).toBe(1)
   })
 
-  // 捕まえる変異: 05-article-date (date の条件の削除)
+  // 捕まえる変異: date の条件の削除
   it('omits the date span when published_at is null', () => {
     const { container } = render(
       <ArticleDetail article={{ ...baseArticle, published_at: null }} onBack={vi.fn()} />,
@@ -65,7 +65,7 @@ describe('ArticleDetail', () => {
     expect(metaSpanCount(container)).toBe(1)
   })
 
-  // 捕まえる変異: 02-article-content (content の三項の反転)、フォールバックリンクの target/rel の削除
+  // 捕まえる変異: content の三項の反転、フォールバックリンクの target/rel の削除
   it('shows the fallback with a source link when content is null', () => {
     const { container } = render(
       <ArticleDetail article={{ ...baseArticle, content: null }} onBack={vi.fn()} />,
@@ -79,14 +79,14 @@ describe('ArticleDetail', () => {
     expect(container.querySelector('.detail-content')).toBeNull()
   })
 
-  // 捕まえる変異: 02-article-content。空文字も欠損として扱う真偽判定を守る
+  // 捕まえる変異: content の三項の反転。空文字も欠損として扱う真偽判定を守る
   it('shows the fallback when content is an empty string', () => {
     render(<ArticleDetail article={{ ...baseArticle, content: '' }} onBack={vi.fn()} />)
 
     expect(screen.getByText('本文がありません。')).not.toBeNull()
   })
 
-  // 捕まえる変異: 04-article-sanitize (DOMPurify.sanitize の削除)
+  // 捕まえる変異: DOMPurify.sanitize の削除
   it('strips dangerous markup from content', () => {
     const { container } = render(
       <ArticleDetail
@@ -105,7 +105,7 @@ describe('ArticleDetail', () => {
     expect(img.getAttribute('onerror')).toBeNull()
   })
 
-  // 捕まえる変異: 03-article-back (onBack の切り離し)
+  // 捕まえる変異: onBack の切り離し
   it('calls onBack when the back button is clicked', async () => {
     const user = userEvent.setup()
     const onBack = vi.fn()

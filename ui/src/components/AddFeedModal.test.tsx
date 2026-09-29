@@ -12,9 +12,10 @@ function renderModal(
 }
 
 describe('AddFeedModal', () => {
-  // 捕まえる変異: 07-modal-empty-guard (空送信ガードの削除)。
+  // 捕まえる変異: 空送信ガードの削除。
   // type="url" の入力は前後の空白を自ら落とすため、空白だけの状態は
-  // DOM 経由では到達できない。ここでは到達できる空状態だけを確かめる
+  // DOM 経由では到達できない。ここでは到達できる空状態だけを確かめる。
+  // 2026-09-29 に jsdom で実測: fireEvent.change で '   ' を入れると value は "" になる
   it('does not call onAdd when submitted empty', async () => {
     const user = userEvent.setup()
     const { onAdd, onClose } = renderModal()
@@ -31,7 +32,7 @@ describe('AddFeedModal', () => {
     expect(onClose).not.toHaveBeenCalled()
   })
 
-  // 捕まえる変異: 06-modal-submit (onAdd 呼び出しの削除)
+  // 捕まえる変異: onAdd 呼び出しの削除
   it('calls onAdd with the typed URL on submit', async () => {
     const user = userEvent.setup()
     const onAdd = vi.fn().mockResolvedValue(undefined)
@@ -46,7 +47,7 @@ describe('AddFeedModal', () => {
     expect(onAdd).toHaveBeenCalledWith('https://example.com/feed.xml')
   })
 
-  // 捕まえる変異: 10-modal-loading-display。解決を遅延させ、応答待ちの間の表示を確定させる
+  // 捕まえる変異: 応答待ちの表示の削除。解決を遅延させ、応答待ちの間の表示を確定させる
   it('shows the loading state while onAdd is pending', async () => {
     const user = userEvent.setup()
     let resolve!: () => void
@@ -66,7 +67,7 @@ describe('AddFeedModal', () => {
     await click
   })
 
-  // 捕まえる変異: 09-modal-loading。送信が終われば待機表示に戻る（setLoading(false) の削除で落ちる）
+  // 捕まえる変異: 送信後の待機表示への復帰の削除（setLoading(false) の削除で落ちる）
   it('returns the button to its idle label after onAdd resolves', async () => {
     const user = userEvent.setup()
     renderModal()
@@ -79,7 +80,7 @@ describe('AddFeedModal', () => {
     expect(await screen.findByText('追加')).not.toBeNull()
   })
 
-  // 捕まえる変異: 13-modal-finally (finally を外し catch で握りつぶすと reject 時に戻らない)。
+  // 捕まえる変異: finally を外し catch で握りつぶすと reject 時に表示が戻らない。
   // reject は未処理拒否として浮くため、process レベルで一時的に握りつぶす。
   // window の unhandledrejection では届かず、process への登録が必要だった
   it('returns the button to its idle label after onAdd rejects', async () => {
@@ -103,7 +104,7 @@ describe('AddFeedModal', () => {
     }
   })
 
-  // 捕まえる変異: 08-modal-cancel (キャンセルボタンの onClose 切り離し)
+  // 捕まえる変異: キャンセルボタンの onClose 切り離し
   it('calls onClose from the cancel button', async () => {
     const user = userEvent.setup()
     const onAdd = vi.fn().mockResolvedValue(undefined)
@@ -115,7 +116,7 @@ describe('AddFeedModal', () => {
     expect(onAdd).not.toHaveBeenCalled()
   })
 
-  // 捕まえる変異: 08-modal-cancel-type (キャンセルボタンの type="button" の削除)。
+  // 捕まえる変異: キャンセルボタンの type="button" の削除。
   // URL 入力後にキャンセルを押すと、type が無い button は submit として扱われ
   // handleSubmit が onAdd を呼んでしまう。空のままでは空ガードが誤りを隠すため、
   // 入力済みの状態で押す
@@ -134,7 +135,7 @@ describe('AddFeedModal', () => {
     expect(onAdd).not.toHaveBeenCalled()
   })
 
-  // 捕まえる変異: 12-modal-prevent-default (handleSubmit の e.preventDefault() の削除)。
+  // 捕まえる変異: handleSubmit の e.preventDefault() の削除。
   // jsdom は form 送信のナビゲーションを実装しないため、既定動作の有無そのものは
   // 観測できない。呼び出し自体をスパイで確かめる
   it('calls preventDefault on submit', async () => {
@@ -150,7 +151,7 @@ describe('AddFeedModal', () => {
     expect(spy).toHaveBeenCalled()
   })
 
-  // 捕まえる変異: 11-modal-overlay (overlay の onClose 切り離し)
+  // 捕まえる変異: overlay の onClose 切り離し
   it('calls onClose from the overlay but not from inside the dialog', async () => {
     const user = userEvent.setup()
     const onClose = vi.fn()
