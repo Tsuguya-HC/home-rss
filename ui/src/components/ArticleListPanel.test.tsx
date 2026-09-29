@@ -94,6 +94,16 @@ describe('ArticleListPanel', () => {
     expect(active[0].textContent).toContain('Second article')
   })
 
+  // The list and the selection come from separate state in the app, so the same article
+  // arrives as distinct objects; comparing references would leave nothing highlighted.
+  it('marks the article whose id matches the selection even when it is a different object', () => {
+    const { container } = renderPanel({ selectedArticle: { ...second } })
+
+    const active = container.querySelectorAll('.article-item--active')
+    expect(active).toHaveLength(1)
+    expect(active[0].textContent).toContain('Second article')
+  })
+
   it('marks no article as active when none is selected', () => {
     const { container } = renderPanel({ selectedArticle: null })
 

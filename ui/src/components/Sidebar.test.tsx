@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Sidebar } from './Sidebar'
 import { Feed } from '../types'
@@ -179,9 +179,7 @@ describe('Sidebar', () => {
 
     expect(onAddFeed).toHaveBeenCalledTimes(1)
     expect(onAddFeed).toHaveBeenCalledWith('https://example.com/new.xml')
-    await waitFor(() =>
-      expect(screen.queryByPlaceholderText('https://example.com/feed.xml')).toBeNull(),
-    )
+    expect(screen.queryByPlaceholderText('https://example.com/feed.xml')).toBeNull()
   })
 
   it('keeps the add-feed modal open while onAddFeed is pending', async () => {
@@ -198,10 +196,10 @@ describe('Sidebar', () => {
     await user.click(screen.getByText('追加'))
 
     expect(screen.getByPlaceholderText('https://example.com/feed.xml')).toBeTruthy()
-    resolveAdd()
-    await waitFor(() =>
-      expect(screen.queryByPlaceholderText('https://example.com/feed.xml')).toBeNull(),
-    )
+    await act(async () => {
+      resolveAdd()
+    })
+    expect(screen.queryByPlaceholderText('https://example.com/feed.xml')).toBeNull()
   })
 
   it('opens the file picker when OPML インポート is clicked', async () => {
@@ -239,7 +237,7 @@ describe('Sidebar', () => {
     const file = new File(['<opml/>'], 'feeds.opml')
 
     await user.upload(input, file)
-    await waitFor(() => expect(input.value).toBe(''))
+    expect(input.value).toBe('')
     await user.upload(input, file)
 
     expect(onImportOpml).toHaveBeenCalledTimes(2)
