@@ -240,7 +240,7 @@ describe('api', () => {
   })
 
   // Adding a feed waits 45 seconds for the server-side fetch, so this fails
-  // if addFeed falls back to the default timeout.
+  // if the timeout is shortened (e.g. 40 seconds) or falls back to the default.
   it('gives adding a feed 45 seconds before timing out', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('fetch', hangingFetch())
@@ -254,9 +254,9 @@ describe('api', () => {
         settled = true
       },
     )
-    await vi.advanceTimersByTimeAsync(30_000)
+    await vi.advanceTimersByTimeAsync(44_999)
     expect(settled).toBe(false)
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(1)
     await expect(pending).rejects.toThrow('request timed out')
   })
 })

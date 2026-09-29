@@ -107,7 +107,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 
 ## 3. 守るべき性質
 
-テストの場所は、Rust の単体テストと `shared/tests/` の統合テストがファイル名、e2e が `e2e/tests/api.rs`、UI が `*.test.tsx`。
+テストの場所は、Rust の単体テストと `shared/tests/` の統合テストがファイル名、e2e が `e2e/tests/api.rs`、UI が `*.test.ts(x)`。
 
 ### URL の受け入れ（SSRF）
 
