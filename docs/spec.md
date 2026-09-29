@@ -123,7 +123,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 - 取得失敗とパース不能は 201 にしない。保存失敗は 502 ではなく 500 — `server/src/lib.rs`: `fetch_failure_is_surfaced_not_created`, `unparseable_feed_is_surfaced_not_created`, `store_failure_is_surfaced_as_server_error_not_bad_gateway`（502 / 422 という値そのものはテスト無し）
 - 同じ URL を再度追加しても行は増えず、既存行を取得し直して返す — テスト無し
 - 即時取得は送信と本文の読み取りをそれぞれ 15 秒で打ち切り（合計で最大約 30 秒）、定期取得は打ち切らない — `shared/src/fetch.rs`: `returns_some_when_future_resolves_before_timeout`, `returns_none_when_timeout_resolves_first`, `none_timeout_returns_the_future_result_without_racing`
-- UI の追加の待ち時間（45 秒）は、即時取得の打ち切り 2 回分と 10 秒の余裕以上 — `server/src/lib.rs`: `fetch_timeout_is_positive_and_matches_ui_expectation`（UI 側の 45 はテストの中の定数で、`ui/src/api.ts` の値は見ていない）
+- UI の追加の待ち時間（45 秒）は、即時取得の打ち切り 2 回分と 10 秒の余裕以上 — `server/src/lib.rs`: `fetch_timeout_is_positive_and_matches_ui_expectation`（UI 側の 45 はテストの中の定数）、`ui/src/api.test.ts`: `gives adding a feed 45 seconds before timing out`（`ui/src/api.ts` の値を経由する）
 
 ### 取得と保存
 
