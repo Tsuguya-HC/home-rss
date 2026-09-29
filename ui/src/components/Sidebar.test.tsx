@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Sidebar } from './Sidebar'
 import { Feed } from '../types'
@@ -35,7 +35,8 @@ interface SidebarCallbacks {
 
 // このテストが捕まえる変異: 「すべて」ボタンの表示・選択状態・バッジ表示の欠落。
 // fixture が FeedItem の props 境界（未読数キー無し・title null）を跨ぐ理由は、
-// Sidebar が unreadCounts[feed.id] || 0 と title || url のフォールバックを持つため。
+// 未読数のフォールバック（unreadCounts[feed.id] || 0）は Sidebar が、
+// title が無いときの url 表示（feed.title || feed.url）は子コンポーネント FeedItem が持つため。
 function renderSidebar(
   props: Partial<{
     feeds: Feed[]
@@ -180,6 +181,58 @@ describe('Sidebar', () => {
     expect(onAddFeed).toHaveBeenCalledTimes(1)
     expect(onAddFeed).toHaveBeenCalledWith('https://example.com/new.xml')
     expect(screen.queryByPlaceholderText('https://example.com/feed.xml')).toBeNull()
+  })
+
+  // このテストが捕まえる変異: AddFeedModal の onAdd 完了を待たずにモーダルを
+  // 閉じる変更（await onAddFeed(url) の await 剥がし）。解決前のモーダルの
+  // 「追加中...」表示（AddFeedModal が onAdd の解決まで loading を保つこと）が
+  // 無くなれば、await が外れている。
+  it('keeps the add-feed modal open until adding finishes', async () => {
+    const user = userEvent.setup()
+    let resolveAdd!: (value: undefined) => void
+    const onAddFeed = vi
+      .fn()
+      .mockImplementation(() => new Promise<undefined>((resolve) => { resolveAdd = resolve }))
+    renderSidebar({}, { onAddFeed })
+    await user.click(screen.getByText('+ フィード追加'))
+    await user.type(
+      screen.getByPlaceholderText('https://example.com/feed.xml'),
+      'https://example.com/new.xml',
+    )
+    await user.click(screen.getByText('追加'))
+    expect(onAddFeed).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('追加中...')).toBeTruthy()
+    expect(screen.queryByPlaceholderText('https://example.com/feed.xml')).not.toBeNull()
+    await act(async () => {
+      resolveAdd(undefined)
+    })
+    expect(screen.queryByPlaceholderText('https://example.com/feed.xml')).toBeNull()
+  })
+
+  // このテストが捕まえる変異: handleOpmlChange の e.target.value = '' の削除。
+  // jsdom では fireEvent.change で files は反映されるが input.value は空のままになる
+  // （2026-09-29 実測。再現: input type=file に fireEvent.change(input,
+  // { target: { files: [file] } }) した直後に input.value を読むと ''）ため、
+  // value の読み取りではリセットを観測できず、setter の記録で '' 代入そのものを観測する。
+  // 記録は対象の input 要素にだけ置き、fireEvent.change の前に仕掛ける。
+  it('resets the OPML file input after an import', async () => {
+    const { onImportOpml } = renderSidebar()
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    const assignedValues: unknown[] = []
+    Object.defineProperty(input, 'value', {
+      configurable: true,
+      get() {
+        return ''
+      },
+      set(v: unknown) {
+        assignedValues.push(v)
+      },
+    })
+    const file = new File(['<opml></opml>'], 'feeds.opml', { type: 'text/xml' })
+    fireEvent.change(input, { target: { files: [file] } })
+    expect(onImportOpml).toHaveBeenCalledTimes(1)
+    await act(async () => {})
+    expect(assignedValues).toEqual([''])
   })
 
   it('imports an OPML file through the hidden file input', async () => {

@@ -101,4 +101,34 @@ describe('ArticleListItem', () => {
       (document.querySelector('.article-item-thumbnail') as HTMLImageElement)?.getAttribute('src'),
     ).toBe('https://example.com/other.jpg')
   })
+
+  // このテストが捕まえる変異: useEffect の依存配列から article.id を落とす変更。
+  // 同じサムネイル URL を共有する別記事への切り替えでは image_url が変わらないため、
+  // id だけを変える rerender でなければ検出できない。
+  it('shows the thumbnail again when only the id changes after an error', () => {
+    const { rerender } = render(
+      <ArticleListItem article={article()} isSelected={false} onClick={vi.fn()} />,
+    )
+    fireEvent.error(document.querySelector('.article-item-thumbnail') as Element)
+    expect(document.querySelector('.article-item-thumbnail')).toBeNull()
+
+    rerender(
+      <ArticleListItem article={article({ id: 'a2' })} isSelected={false} onClick={vi.fn()} />,
+    )
+    expect(
+      (document.querySelector('.article-item-thumbnail') as HTMLImageElement)?.getAttribute('src'),
+    ).toBe('https://example.com/thumb.jpg')
+  })
+
+  // このテストが捕まえる変異: <li> の --with-thumbnail クラスをエラー後の imageUrl
+  // （state 反映後の値）で決める変更。現状の仕様は article.image_url を見る側
+  // （エラー後もクラスを残す）なので、残ることを固定する。
+  it('keeps the with-thumbnail layout class after an image error', () => {
+    render(<ArticleListItem article={article()} isSelected={false} onClick={vi.fn()} />)
+    fireEvent.error(document.querySelector('.article-item-thumbnail') as Element)
+    expect(document.querySelector('.article-item-thumbnail')).toBeNull()
+    expect(document.querySelector('.article-item')?.className).toContain(
+      'article-item--with-thumbnail',
+    )
+  })
 })

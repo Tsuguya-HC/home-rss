@@ -138,4 +138,14 @@ describe('ArticleListPanel', () => {
     renderPanel({ articles: [articleA], selectedArticle: null })
     expect(document.querySelector('.article-item--active')).toBeNull()
   })
+
+  // このテストが捕まえる変異: isSelected の判定を id 比較から参照比較に変える変更。
+  // selectedArticle と articles が別々の fetch 結果から来る実アプリでは
+  // id は同じでも参照が異なるため、別オブジェクトで同じ id を渡して確かめる。
+  it('marks the article active when the selected article is an equal-id copy', () => {
+    renderPanel({ articles: [articleA, articleB], selectedArticle: { ...articleB } })
+    const active = document.querySelectorAll('.article-item--active')
+    expect(active.length).toBe(1)
+    expect(active[0].textContent).toContain('Article 2')
+  })
 })
