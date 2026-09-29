@@ -77,7 +77,18 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # リリースはマージ前にこの leaf の検証呼び出しを通った commit から作るので、
-      # テストは検証呼び出しでだけ回す。
+      # 検査とテストは検証呼び出しでだけ回す。型は Build UI の tsc が見るので
+      # typecheck は別に回さない。
+      - name: Lint UI
+        if: ${{ !inputs.publish }}
+        working-directory: ui
+        run: pnpm run lint
+
+      - name: Check UI formatting
+        if: ${{ !inputs.publish }}
+        working-directory: ui
+        run: pnpm run fmt:check
+
       - name: Test UI
         if: ${{ !inputs.publish }}
         working-directory: ui

@@ -46,9 +46,7 @@ export function Sidebar({
           onClick={() => onSelectFeed(null)}
         >
           <span className="feed-name">すべて</span>
-          {totalUnread > 0 && (
-            <span className="unread-badge">{totalUnread}</span>
-          )}
+          {totalUnread > 0 && <span className="unread-badge">{totalUnread}</span>}
         </button>
 
         {feeds.map((feed) => (

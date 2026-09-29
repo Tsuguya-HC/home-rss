@@ -30,11 +30,7 @@ export function ArticleListPanel({
         </button>
         <div className="toolbar-controls">
           <label className="toggle-label">
-            <input
-              type="checkbox"
-              checked={showUnreadOnly}
-              onChange={onToggleUnread}
-            />
+            <input type="checkbox" checked={showUnreadOnly} onChange={onToggleUnread} />
             未読のみ
           </label>
           <button className="btn btn--secondary btn--sm" onClick={onMarkAllRead}>

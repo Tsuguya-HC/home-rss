@@ -1,4 +1,6 @@
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
@@ -151,7 +153,9 @@ body {
   padding: 2px 4px;
   border-radius: 3px;
   opacity: 0;
-  transition: opacity 0.1s, color 0.1s;
+  transition:
+    opacity 0.1s,
+    color 0.1s;
 }
 .feed-item:hover .delete-btn {
   opacity: 1;

@@ -16,12 +16,7 @@ export function ArticleDetail({ article, onBack }: ArticleDetailProps) {
         <button className="btn-icon back-btn mobile-back-btn" onClick={onBack} title="戻る">
           ←
         </button>
-        <a
-          href={article.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="detail-link"
-        >
+        <a href={article.url} target="_blank" rel="noopener noreferrer" className="detail-link">
           元記事を開く ↗
         </a>
       </div>

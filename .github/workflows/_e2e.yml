@@ -1,8 +1,8 @@
 name: e2e
 
-# Runs scripts/test.sh: Rust unit tests, the UI suite, and e2e/run.sh (server and
-# cleaner under `spin up` against a throwaway PostgreSQL). Verification only;
-# nothing here is published.
+# Runs scripts/test.sh, the whole suite including e2e/run.sh (server and cleaner
+# under `spin up` against a throwaway PostgreSQL). Verification only; nothing
+# here is published.
 on:
   workflow_call:
 
@@ -52,7 +52,7 @@ jobs:
           # renovate: datasource=github-releases depName=rust-lang/rust
           RUST_VERSION: "1.98.1"
         run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update --target wasm32-wasip1
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update --target wasm32-wasip1 --component rustfmt,clippy
           rustup default "$RUST_VERSION"
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -66,7 +66,7 @@ jobs:
           version: v${{ env.SPIN_CLI_VERSION }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      # scripts/test.sh runs the UI suite too (pnpm install + pnpm test).
+      # scripts/test.sh checks and tests the UI too (pnpm install, typecheck, lint, fmt:check, test).
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           package_json_file: ui/package.json
