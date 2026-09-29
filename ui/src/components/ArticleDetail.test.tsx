@@ -25,7 +25,7 @@ function metaSpanCount(container: HTMLElement): number {
 }
 
 describe('ArticleDetail', () => {
-  // 捕まえる変異: 02-article-content (content の三項の反転)
+  // 捕まえる変異: 02-article-content (content の三項の反転)、元記事リンクの target/rel の削除
   it('renders title, author, date, content, and a link to the source', () => {
     const { container } = render(<ArticleDetail article={baseArticle} onBack={vi.fn()} />)
 
@@ -38,6 +38,8 @@ describe('ArticleDetail', () => {
     const links = screen.getAllByRole('link', { name: '元記事を開く ↗' })
     expect(links).toHaveLength(1)
     expect(links[0].getAttribute('href')).toBe('https://example.com/articles/1')
+    expect(links[0].getAttribute('target')).toBe('_blank')
+    expect(links[0].getAttribute('rel')).toBe('noopener noreferrer')
   })
 
   // 捕まえる変異: 01-article-author (author の条件の削除)
@@ -63,7 +65,7 @@ describe('ArticleDetail', () => {
     expect(metaSpanCount(container)).toBe(1)
   })
 
-  // 捕まえる変異: 02-article-content (content の三項の反転)
+  // 捕まえる変異: 02-article-content (content の三項の反転)、フォールバックリンクの target/rel の削除
   it('shows the fallback with a source link when content is null', () => {
     const { container } = render(
       <ArticleDetail article={{ ...baseArticle, content: null }} onBack={vi.fn()} />,
@@ -72,6 +74,8 @@ describe('ArticleDetail', () => {
     expect(screen.getByText('本文がありません。')).not.toBeNull()
     const link = screen.getByRole('link', { name: '元記事を読む →' })
     expect(link.getAttribute('href')).toBe('https://example.com/articles/1')
+    expect(link.getAttribute('target')).toBe('_blank')
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer')
     expect(container.querySelector('.detail-content')).toBeNull()
   })
 

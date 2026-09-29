@@ -154,7 +154,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 - 既読にする操作は何度呼んでも 204 で、行は 1 つ — e2e: `marking_read_is_idempotent_and_read_all_clears_unread`
 - 全既読は全フィードの未読を 0 にする — e2e: `marking_read_is_idempotent_and_read_all_clears_unread`
 - `GET /api/stats` はフィード数と未読記事数を返す — e2e: `stats_count_feeds_and_unread_articles`
-- 記事本文は DOMPurify でサニタイズしてから表示する — テスト無し
+- 記事本文は DOMPurify でサニタイズしてから表示する — `ui/src/components/ArticleDetail.test.tsx`: `strips dangerous markup from content`
 
 ### フィードの削除
 

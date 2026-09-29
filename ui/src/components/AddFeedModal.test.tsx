@@ -91,6 +91,41 @@ describe('AddFeedModal', () => {
     expect(onAdd).not.toHaveBeenCalled()
   })
 
+  // 捕まえる変異: 08-modal-cancel-type (キャンセルボタンの type="button" の削除)。
+  // URL 入力後にキャンセルを押すと、type が無い button は submit として扱われ
+  // handleSubmit が onAdd を呼んでしまう。空のままでは空ガードが誤りを隠すため、
+  // 入力済みの状態で押す
+  it('does not call onAdd when cancel is clicked after typing a URL', async () => {
+    const user = userEvent.setup()
+    const onAdd = vi.fn().mockResolvedValue(undefined)
+    const onClose = vi.fn()
+    renderModal(onAdd, onClose)
+
+    await user.type(
+      screen.getByPlaceholderText('https://example.com/feed.xml'),
+      'https://example.com/feed.xml',
+    )
+    await user.click(screen.getByText('キャンセル'))
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onAdd).not.toHaveBeenCalled()
+  })
+
+  // 捕まえる変異: 12-modal-prevent-default (handleSubmit の e.preventDefault() の削除)。
+  // jsdom は form 送信のナビゲーションを実装しないため、既定動作の有無そのものは
+  // 観測できない。呼び出し自体をスパイで確かめる
+  it('calls preventDefault on submit', async () => {
+    renderModal()
+
+    const input = screen.getByPlaceholderText('https://example.com/feed.xml')
+    const form = input.closest('form')
+    if (!form) throw new Error('missing form')
+    const event = new Event('submit', { bubbles: true, cancelable: true })
+    const spy = vi.spyOn(event, 'preventDefault')
+    form.dispatchEvent(event)
+
+    expect(spy).toHaveBeenCalled()
+  })
+
   // 捕まえる変異: 11-modal-overlay (overlay の onClose 切り離し)
   it('calls onClose from the overlay but not from inside the dialog', async () => {
     const user = userEvent.setup()
