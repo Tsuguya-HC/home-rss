@@ -187,6 +187,17 @@ describe('api', () => {
     await expect(api.getFeeds()).rejects.toThrow('feed unreachable')
   })
 
+  // A valid JSON body without an `error` field keeps the status line,
+  // so this fails if the `if (body.error)` guard is dropped.
+  it('throws the status line of a non-2xx JSON response without an error field', async () => {
+    const fetchMock = stubFetch()
+    fetchMock.mockResolvedValue(
+      errorResponse(404, 'Not Found', async () => ({ message: 'no such feed' })),
+    )
+
+    await expect(api.getFeeds()).rejects.toThrow('404 Not Found')
+  })
+
   // Without a JSON error the status line is the message, so this fails if the fallback changes.
   it('throws the status line of a non-2xx response without a JSON error', async () => {
     const fetchMock = stubFetch()
