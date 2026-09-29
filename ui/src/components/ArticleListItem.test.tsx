@@ -64,6 +64,7 @@ describe('ArticleListItem', () => {
     expect(img.getAttribute('src')).toBe('https://example.com/a1.png')
     expect(img.getAttribute('referrerpolicy')).toBe('no-referrer')
     expect(img.getAttribute('loading')).toBe('lazy')
+    expect(img.getAttribute('decoding')).toBe('async')
     expect(container.querySelector('.article-item--with-thumbnail')).not.toBeNull()
   })
 
