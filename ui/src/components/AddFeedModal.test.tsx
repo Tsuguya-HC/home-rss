@@ -79,6 +79,30 @@ describe('AddFeedModal', () => {
     expect(await screen.findByText('追加')).not.toBeNull()
   })
 
+  // 捕まえる変異: 13-modal-finally (finally を外し catch で握りつぶすと reject 時に戻らない)。
+  // reject は未処理拒否として浮くため、process レベルで一時的に握りつぶす。
+  // window の unhandledrejection では届かず、process への登録が必要だった
+  it('returns the button to its idle label after onAdd rejects', async () => {
+    const swallow = () => {}
+    process.on('unhandledRejection', swallow)
+    try {
+      const user = userEvent.setup()
+      const onAdd = vi.fn().mockRejectedValue(new Error('boom'))
+      renderModal(onAdd)
+
+      await user.type(
+        screen.getByPlaceholderText('https://example.com/feed.xml'),
+        'https://example.com/feed.xml',
+      )
+      await user.click(screen.getByText('追加'))
+      expect(await screen.findByText('追加')).not.toBeNull()
+      // 未処理拒否が飛ぶ余地を作ってから listener を外す
+      await new Promise((r) => setTimeout(r, 50))
+    } finally {
+      process.off('unhandledRejection', swallow)
+    }
+  })
+
   // 捕まえる変異: 08-modal-cancel (キャンセルボタンの onClose 切り離し)
   it('calls onClose from the cancel button', async () => {
     const user = userEvent.setup()
