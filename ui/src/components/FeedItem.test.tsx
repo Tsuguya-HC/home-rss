@@ -15,9 +15,18 @@ const feed: Feed = {
   created_at: null,
 }
 
-function renderItem(onDelete = vi.fn().mockResolvedValue(undefined), onSelect = vi.fn()) {
+function renderItem(
+  onDelete = vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+  onSelect = vi.fn<() => void>(),
+) {
   render(
-    <FeedItem feed={feed} unreadCount={0} isSelected={false} onSelect={onSelect} onDelete={onDelete} />,
+    <FeedItem
+      feed={feed}
+      unreadCount={0}
+      isSelected={false}
+      onSelect={onSelect}
+      onDelete={onDelete}
+    />,
   )
   return { onDelete, onSelect }
 }

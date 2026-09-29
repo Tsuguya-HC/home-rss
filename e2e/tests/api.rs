@@ -9,7 +9,8 @@ use serde_json::Value;
 use tokio_postgres::{Client, NoTls};
 
 fn env(key: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| panic!("{key} is not set; run the suite through e2e/run.sh"))
+    std::env::var(key)
+        .unwrap_or_else(|_| panic!("{key} is not set; run the suite through e2e/run.sh"))
 }
 
 async fn fresh_db() -> Client {
@@ -27,10 +28,13 @@ async fn fresh_db() -> Client {
 }
 
 async fn seed_feed(db: &Client, url: &str) -> String {
-    db.query_one("INSERT INTO feeds (url) VALUES ($1) RETURNING id::text", &[&url])
-        .await
-        .expect("insert feed")
-        .get(0)
+    db.query_one(
+        "INSERT INTO feeds (url) VALUES ($1) RETURNING id::text",
+        &[&url],
+    )
+    .await
+    .expect("insert feed")
+    .get(0)
 }
 
 async fn seed_article(db: &Client, feed_id: &str, slug: &str, age_days: i32) -> String {
@@ -39,7 +43,12 @@ async fn seed_article(db: &Client, feed_id: &str, slug: &str, age_days: i32) -> 
          VALUES ($1::text::uuid, $2, $3, \
                  now() - make_interval(days => $4), now() - make_interval(days => $4)) \
          RETURNING id::text",
-        &[&feed_id, &format!("https://example.com/{slug}"), &slug, &age_days],
+        &[
+            &feed_id,
+            &format!("https://example.com/{slug}"),
+            &slug,
+            &age_days,
+        ],
     )
     .await
     .expect("insert article")
@@ -72,13 +81,21 @@ async fn get_json(path: &str) -> (u16, Value) {
 async fn post(path: &str, body: Option<&str>) -> u16 {
     let mut req = reqwest::Client::new().post(server(path));
     if let Some(body) = body {
-        req = req.header("content-type", "application/json").body(body.to_owned());
+        req = req
+            .header("content-type", "application/json")
+            .body(body.to_owned());
     }
     req.send().await.expect("POST").status().as_u16()
 }
 
 async fn delete(path: &str) -> u16 {
-    reqwest::Client::new().delete(server(path)).send().await.expect("DELETE").status().as_u16()
+    reqwest::Client::new()
+        .delete(server(path))
+        .send()
+        .await
+        .expect("DELETE")
+        .status()
+        .as_u16()
 }
 
 fn titles(articles: &Value) -> Vec<&str> {
@@ -162,8 +179,14 @@ async fn marking_read_is_idempotent_and_read_all_clears_unread() {
     let first = seed_article(&db, &feed, "first", 1).await;
     seed_article(&db, &feed, "second", 1).await;
 
-    assert_eq!(post(&format!("/api/articles/{first}/read"), None).await, 204);
-    assert_eq!(post(&format!("/api/articles/{first}/read"), None).await, 204);
+    assert_eq!(
+        post(&format!("/api/articles/{first}/read"), None).await,
+        204
+    );
+    assert_eq!(
+        post(&format!("/api/articles/{first}/read"), None).await,
+        204
+    );
     assert_eq!(count(&db, "SELECT COUNT(*) FROM read_status").await, 1);
 
     assert_eq!(post("/api/articles/read-all", None).await, 204);

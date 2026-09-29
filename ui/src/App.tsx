@@ -168,9 +168,7 @@ export default function App() {
     })
   }
 
-  const visibleArticles = showUnreadOnly
-    ? articles.filter((a) => !readIds.has(a.id))
-    : articles
+  const visibleArticles = showUnreadOnly ? articles.filter((a) => !readIds.has(a.id)) : articles
 
   const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0)
 
@@ -195,7 +193,9 @@ export default function App() {
           />
         </aside>
 
-        <section className={`article-list${mobileView === 'detail' ? ' article-list--hidden' : ''}`}>
+        <section
+          className={`article-list${mobileView === 'detail' ? ' article-list--hidden' : ''}`}
+        >
           <ArticleListPanel
             articles={visibleArticles}
             loading={loadingArticles}
@@ -211,12 +211,11 @@ export default function App() {
           />
         </section>
 
-        <section className={`article-detail${mobileView !== 'detail' ? ' article-detail--hidden' : ''}`}>
+        <section
+          className={`article-detail${mobileView !== 'detail' ? ' article-detail--hidden' : ''}`}
+        >
           {selectedArticle ? (
-            <ArticleDetail
-              article={selectedArticle}
-              onBack={() => setMobileView('list')}
-            />
+            <ArticleDetail article={selectedArticle} onBack={() => setMobileView('list')} />
           ) : (
             <div className="detail-placeholder">記事を選択してください</div>
           )}

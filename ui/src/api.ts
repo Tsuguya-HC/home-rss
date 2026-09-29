@@ -49,8 +49,7 @@ export const api = {
       ADD_FEED_TIMEOUT_MS,
     ),
 
-  deleteFeed: (id: string) =>
-    request<void>(`/api/feeds/${id}`, { method: 'DELETE' }),
+  deleteFeed: (id: string) => request<void>(`/api/feeds/${id}`, { method: 'DELETE' }),
 
   getArticles: (feedId?: string | null, unread?: boolean) => {
     const params = new URLSearchParams()
@@ -60,11 +59,9 @@ export const api = {
     return request<Article[]>(`/api/articles${query ? `?${query}` : ''}`)
   },
 
-  markRead: (id: string) =>
-    request<void>(`/api/articles/${id}/read`, { method: 'POST' }),
+  markRead: (id: string) => request<void>(`/api/articles/${id}/read`, { method: 'POST' }),
 
-  markAllRead: () =>
-    request<void>('/api/articles/read-all', { method: 'POST' }),
+  markAllRead: () => request<void>('/api/articles/read-all', { method: 'POST' }),
 
   importOpml: (file: File) =>
     // imported + already_present + skipped_invalid + skipped_blocked ==

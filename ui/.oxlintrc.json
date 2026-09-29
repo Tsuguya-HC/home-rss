@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  // Listing plugins replaces the default set, so the defaults are repeated.
+  // jsx-a11y is left out: clearing what it reports means adding keyboard
+  // handling to clickable elements, which is a behavior change of its own.
+  "plugins": ["unicorn", "typescript", "oxc", "react", "vitest"],
+  "rules": {
+    // Clearing what this reports means moving state updates out of effects,
+    // which changes when renders happen and needs its own change.
+    "react/set-state-in-effect": "off"
+  }
+}

@@ -42,12 +42,18 @@ jobs:
           # renovate: datasource=github-releases depName=rust-lang/rust
           RUST_VERSION: "1.98.1"
         run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update --component rustfmt,clippy
           rustup default "$RUST_VERSION"
 
       # 検証専用の leaf なので、キャッシュを読むのはここだけで完結する。
       # リリースビルドはこの leaf を呼ばない。
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
 
       - name: Run tests
         run: cargo test --workspace --target x86_64-unknown-linux-gnu

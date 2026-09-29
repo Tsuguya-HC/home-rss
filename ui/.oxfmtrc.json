@@ -1,0 +1,7 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  // The code was written with single quotes and no semicolons; keeping them
+  // limits the first format to whitespace and line breaks.
+  "singleQuote": true,
+  "semi": false
+}

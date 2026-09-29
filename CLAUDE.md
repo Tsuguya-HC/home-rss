@@ -119,13 +119,17 @@ E2E_DATABASE_URL="postgres://postgres:e2e@${IP}:5432/rss?sslmode=disable" e2e/ru
 E2E_DATABASE_URL=... scripts/test.sh
 ```
 
-Rust の単体テスト・UI のテスト・e2e を順に回す。テストの種類を足したらここにも足す
-（自動の実装ではこれだけがテスト全体として回る）。
+Rust と UI の検査（整形・lint・型）、単体テスト、e2e を順に回す。検査やテストの種類を
+足したらここにも足す（自動の実装ではこれだけがテスト全体として回る）。
+
+整形で落ちたら `cargo fmt --all`（e2e は `cargo fmt --manifest-path e2e/Cargo.toml`）と
+`cd ui && pnpm run fmt` で直す。clippy と oxlint は警告も失敗にする。
 
 ### UI のテスト
 
 ```bash
 cd ui && pnpm test
+cd ui && pnpm run typecheck && pnpm run lint && pnpm run fmt:check
 ```
 
 - vitest + jsdom + Testing Library。テストは対象の隣に `*.test.ts(x)` で置く
