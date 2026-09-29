@@ -144,7 +144,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 - 保存する画像 URL は記事 URL を基準に絶対化した http / https だけで、2048 文字以下。`#` だけの src は捨てる。無効な候補は飛ばして次を見る — `shared/src/feed.rs`: `dangerous_schemes_are_rejected`, `relative_img_src_is_resolved_against_entry_url`, `overlong_image_url_is_rejected_at_boundary`, `fragment_only_img_src_is_rejected`, `invalid_thumbnail_falls_through_to_enclosure`, `img_without_src_is_skipped_for_next_img`, `body_img_falls_through_invalid_first_src`, `media_content_without_url_does_not_panic`; `shared/tests/feed_image_regressions.rs`: `data_url_pixel_before_real_image_is_skipped`, `invalid_top_candidate_falls_through`
 - 本文の `<img>` 探しは HTML コメントの中を見ず、引用符の種類・属性順・大文字小文字・マルチバイト文字に左右されない — `shared/src/feed.rs`: `img_scanner_handles_quote_variants_case_and_attr_order`, `img_in_html_comment_is_ignored`, `img_with_form_feed_separator_is_recognized`, `multibyte_body_img_is_extracted`; `shared/tests/feed_image_regressions.rs`: `image_inside_html_comment_is_ignored`, `multibyte_text_before_image`
 - 画像の無い記事は `image_url` が NULL — `shared/src/feed.rs`: `entry_without_image_has_none`; `shared/tests/feed_image_regressions.rs`: `entry_without_any_image`
-- 画像の無い記事は一覧でサムネイルの枠を出さず、読み込みに失敗した画像は隠す — テスト無し
+- 画像の無い記事は一覧でサムネイルの枠を出さず、読み込みに失敗した画像は隠す — `ui/src/components/ArticleListItem.test.tsx`: `renders no thumbnail when image_url is missing`, `hides the thumbnail when the image fails to load`
 - 既存の記事の `image_url` は埋め直さない（取得し直しても INSERT が当たらない） — テスト無し
 
 ### 記事と既読
