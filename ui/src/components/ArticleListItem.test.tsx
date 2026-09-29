@@ -101,12 +101,14 @@ describe('ArticleListItem', () => {
     expect(screen.getByText('First article')).toBeTruthy()
   })
 
-  it('keeps the thumbnail while the image loads without error', () => {
+  // Only `error` hides the thumbnail; the component has no `load` handler, so this
+  // fails if one is added that hides (or replaces) the image.
+  it('does not hide the thumbnail when the image finishes loading', () => {
     const { container } = renderItem()
 
     fireEvent.load(thumbnail(container)!)
 
-    expect(thumbnail(container)).not.toBeNull()
+    expect(thumbnail(container)!.getAttribute('src')).toBe('https://example.com/a1.png')
   })
 
   it('shows the thumbnail again when the image url changes after a failure', () => {
