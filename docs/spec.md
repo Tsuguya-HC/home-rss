@@ -85,11 +85,11 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 - `POST /api/feeds` の中で、追加（または既存）の 1 フィードだけを `fetch_and_store()` する
 - 送信と本文読み取りのそれぞれを 15 秒で打ち切る（WASI の outbound HTTP にタイムアウトが無いため）
 - 応答: 取得して保存できたら 201 と取得後の行、取得失敗 502、パース不能 422、保存失敗 500、JSON 不正と URL の拒否は 400（DB に触れない）
-- 取得に失敗しても `feeds` の行は残る
+- 行の INSERT・即時取得・記事保存は 1 トランザクション（`shared/src/db.rs` の `in_transaction()`）で行い、取得失敗・パース不能・保存失敗のいずれでも `feeds` の行も記事も残さない。登録済み URL の再追加が失敗しても、既存行は `ON CONFLICT` が他列を変えないため巻き戻しで元に戻る
 
 ### トランザクション
 
-- コードに `BEGIN` は無い。どの SQL 文も単独で自動コミットされる
+- `POST /api/feeds` の追加だけが `in_transaction()` で BEGIN / COMMIT / ROLLBACK を使う。他の SQL 文は単独で自動コミットされる
 - 接続はリクエスト（fetcher / cleaner は 1 回分）ごとに `db::connect()` で開く
 - `fetch_and_store()` の記事 INSERT と `feeds` UPDATE は別の文で、その間に他の経路が入りうる。記事 INSERT は 1 文なので、1 回分の記事は全部入るか全部入らないか
 - OPML インポートは URL ごとに別の INSERT。途中で DB エラーになると、それまでの行は残って 500 を返す
@@ -122,6 +122,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 - 追加するとその場でそのフィードだけ取得し、成功なら 201 と取得後の行（タイトル等が入ったもの）を返す — `server/src/lib.rs`: `fetched_feed_returns_created`, `fetched_response_body_reflects_updated_feed`（応答への写像だけ。取得から応答までの通しはテスト無し）
 - 取得失敗とパース不能は 201 にしない。保存失敗は 502 ではなく 500 — `server/src/lib.rs`: `fetch_failure_is_surfaced_not_created`, `unparseable_feed_is_surfaced_not_created`, `store_failure_is_surfaced_as_server_error_not_bad_gateway`（502 / 422 という値そのものはテスト無し）
 - 同じ URL を再度追加しても行は増えず、既存行を取得し直して返す — テスト無し
+- 追加直後の取得に失敗したら `feeds` の行も記事も残さず、同じ URL の再追加も同じ失敗で終わる（行は増えない）。登録済み URL の再取得の失敗は既存行を変えない — e2e: `adding_a_feed_whose_first_fetch_fails_leaves_no_feed_behind`、`failing_to_refetch_a_registered_feed_keeps_the_existing_row`（#148）
 - 即時取得は送信と本文の読み取りをそれぞれ 15 秒で打ち切り（合計で最大約 30 秒）、定期取得は打ち切らない — `shared/src/fetch.rs`: `returns_some_when_future_resolves_before_timeout`, `returns_none_when_timeout_resolves_first`, `none_timeout_returns_the_future_result_without_racing`
 - UI の追加の待ち時間（45 秒）は、即時取得の打ち切り 2 回分と 10 秒の余裕以上 — `server/src/lib.rs`: `fetch_timeout_is_positive_and_matches_ui_expectation`（UI 側の 45 はテストの中の定数で、`ui/src/api.ts` の値は見ていない）
 

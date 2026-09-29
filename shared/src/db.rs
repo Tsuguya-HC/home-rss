@@ -25,6 +25,36 @@ pub async fn connect() -> Result<Connection> {
     Ok(conn)
 }
 
+/// Runs `f` on a single connection inside one PostgreSQL transaction:
+/// BEGIN first, COMMIT when it returns `Ok`, ROLLBACK when it returns `Err`.
+/// The closure receives the already-open connection, so every statement it
+/// runs shares the transaction. A COMMIT failure leaves the transaction open,
+/// so best-effort ROLLBACK runs there too rather than leaking it.
+pub async fn in_transaction<'a, T, E, Fut>(
+    conn: &'a Connection,
+    f: impl FnOnce(&'a Connection) -> Fut,
+) -> Result<T, E>
+where
+    E: From<spin_sdk::pg::Error>,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    conn.execute("BEGIN", vec![]).await.map_err(E::from)?;
+    let result = f(conn).await;
+    match result {
+        Ok(value) => {
+            if let Err(e) = conn.execute("COMMIT", vec![]).await {
+                let _ = conn.execute("ROLLBACK", vec![]).await;
+                return Err(E::from(e));
+            }
+            Ok(value)
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", vec![]).await;
+            Err(e)
+        }
+    }
+}
+
 fn force_sslmode_require(url: &str) -> String {
     let (base, query) = match url.split_once('?') {
         Some((base, query)) => (base, query),

@@ -161,29 +161,70 @@ async fn add_feed(req: Request) -> Result<Resp> {
     };
 
     let conn = db::connect().await?;
-    let rows = conn
-        .query(
-            "INSERT INTO feeds (url) VALUES ($1) \
-             ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
-             RETURNING id::text, url, title, site_url, etag, last_modified, \
-             EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
-            vec![ParameterValue::Str(url.to_string())],
-        )
-        .await?
-        .collect()
-        .await?;
-
-    match rows.first() {
-        Some(row) => {
-            let feed = row_to_feed(row)?;
-            let outcome = immediate_fetch(&conn, &feed).await;
-            Ok(immediate_fetch_response(&outcome))
+    // 行の INSERT・即時取得・記事保存を 1 トランザクションにまとめ、
+    // 取得失敗時は行ごと無かったことにする (#148)。登録済み URL の
+    // upsert は既存の他列を変えないので、巻き戻しが既存行を壊さない。
+    let outcome = db::in_transaction(&conn, |conn| async move {
+        let rows = conn
+            .query(
+                "INSERT INTO feeds (url) VALUES ($1) \
+                 ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
+                 RETURNING id::text, url, title, site_url, etag, last_modified, \
+                 EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
+                 EXTRACT(EPOCH FROM created_at)::bigint",
+                vec![ParameterValue::Str(url.to_string())],
+            )
+            .await?
+            .collect()
+            .await?;
+        let row = rows.first().ok_or(AddFeedError::EmptyInsert)?;
+        let feed = row_to_feed(row).map_err(AddFeedError::Unexpected)?;
+        match immediate_fetch(conn, &feed).await {
+            ImmediateFetchOutcome::Fetched(updated) => Ok(updated),
+            ImmediateFetchOutcome::FetchFailed => Err(AddFeedError::FetchFailed),
+            ImmediateFetchOutcome::Unparseable => Err(AddFeedError::Unparseable),
+            ImmediateFetchOutcome::StoreFailed => Err(AddFeedError::StoreFailed),
         }
-        None => Ok(error_response(
+    })
+    .await;
+
+    match outcome {
+        Ok(feed) => Ok(immediate_fetch_response(&ImmediateFetchOutcome::Fetched(
+            feed,
+        ))),
+        Err(AddFeedError::FetchFailed) => Ok(immediate_fetch_response(
+            &ImmediateFetchOutcome::FetchFailed,
+        )),
+        Err(AddFeedError::Unparseable) => Ok(immediate_fetch_response(
+            &ImmediateFetchOutcome::Unparseable,
+        )),
+        Err(AddFeedError::StoreFailed) => Ok(immediate_fetch_response(
+            &ImmediateFetchOutcome::StoreFailed,
+        )),
+        Err(AddFeedError::EmptyInsert) => Ok(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to insert feed",
         )),
+        Err(AddFeedError::Db(e)) => Err(anyhow::anyhow!(e)),
+        Err(AddFeedError::Unexpected(e)) => Err(e),
+    }
+}
+
+/// `add_feed` のトランザクション内で起きる失敗。取得系の 3 つは
+/// エラー応答を返しつつ行ごと巻き戻す (#148)。`Db` と `Unexpected`
+/// はサーバ側の障害として 500 になる。
+enum AddFeedError {
+    Db(spin_sdk::pg::Error),
+    Unexpected(anyhow::Error),
+    EmptyInsert,
+    FetchFailed,
+    Unparseable,
+    StoreFailed,
+}
+
+impl From<spin_sdk::pg::Error> for AddFeedError {
+    fn from(e: spin_sdk::pg::Error) -> Self {
+        AddFeedError::Db(e)
     }
 }
 
@@ -199,7 +240,8 @@ const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// フィード追加直後の即時取得 (#106)。取得〜保存の実処理は
 /// home_rss_shared::fetch::fetch_and_store に一本化されており、定期取得
-/// (fetcher) と同じコードを通る。失敗しても追加自体は残す。
+/// (fetcher) と同じコードを通る。失敗時の巻き戻しは呼び出し側
+/// (add_feed のトランザクション) が行う (#148)。
 async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> ImmediateFetchOutcome {
     match fetch_and_store(conn, &feed.id, &feed.url, None, None, Some(FETCH_TIMEOUT)).await {
         FetchAndStoreOutcome::Stored(updated) => ImmediateFetchOutcome::Fetched(updated),

@@ -209,6 +209,69 @@ async fn adding_a_feed_rejects_urls_the_fetcher_must_not_reach() {
     assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
 }
 
+async fn post_json(path: &str, body: &str) -> (u16, Value) {
+    let resp = reqwest::Client::new()
+        .post(server(path))
+        .header("content-type", "application/json")
+        .body(body.to_owned())
+        .send()
+        .await
+        .expect("POST");
+    let status = resp.status().as_u16();
+    (status, resp.json().await.expect("JSON body"))
+}
+
+#[tokio::test]
+async fn adding_a_feed_whose_first_fetch_fails_leaves_no_feed_behind() {
+    // .invalid は予約済みで名前解決できないので、外部に届かず確定で失敗する
+    // (#148)。取得が1回も成功していないフィードが残ると、fetcher が以後
+    // 毎回失敗し続ける。
+    let db = fresh_db().await;
+    let body = r#"{"url":"https://added.invalid/feed"}"#;
+    let (status, err) = post_json("/api/feeds", body).await;
+    assert_eq!(status, 502);
+    assert_eq!(
+        err,
+        serde_json::json!({"error": "failed to fetch feed"}),
+        "the response must pin which failure the scenario exercises"
+    );
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
+
+    // 同一 URL の再追加が、取り残しを拾わずに同じ失敗で終わること。
+    let (retry_status, _) = post_json("/api/feeds", body).await;
+    assert_eq!(retry_status, 502);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
+}
+
+#[tokio::test]
+async fn failing_to_refetch_a_registered_feed_keeps_the_existing_row() {
+    // 回帰ガード。追加時の失敗を丸ごと無かったことにする実装が、
+    // 既に登録済みの行まで消さないこと (#148)。
+    let db = fresh_db().await;
+    assert_eq!(
+        db.execute(
+            "INSERT INTO feeds (url, title) VALUES ($1, 'kept')",
+            &[&"https://kept.invalid/feed"],
+        )
+        .await
+        .expect("insert feed"),
+        1
+    );
+    let (status, _) = post_json("/api/feeds", r#"{"url":"https://kept.invalid/feed"}"#).await;
+    assert_eq!(status, 502);
+    let rows = db
+        .query(
+            "SELECT title FROM feeds WHERE url = $1",
+            &[&"https://kept.invalid/feed"],
+        )
+        .await
+        .expect("select feed");
+    assert_eq!(rows.len(), 1);
+    let title: Option<String> = rows[0].get(0);
+    assert_eq!(title.as_deref(), Some("kept"));
+}
+
 #[tokio::test]
 async fn cleaner_deletes_only_read_articles_past_retention() {
     let db = fresh_db().await;
