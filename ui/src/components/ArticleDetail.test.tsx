@@ -48,9 +48,7 @@ describe('ArticleDetail', () => {
   })
 
   it('shows the fallback when the content is missing', () => {
-    const { container } = render(
-      <ArticleDetail article={{ ...article, content: null }} onBack={vi.fn<() => void>()} />,
-    )
+    const { container } = renderDetail({ content: null })
 
     expect(screen.getByText('本文がありません。')).toBeTruthy()
     expect(container.querySelector('.detail-content')).toBeNull()
@@ -58,12 +56,7 @@ describe('ArticleDetail', () => {
 
   // sanitize を外すと script 要素が残る。
   it('strips scripts from the content', () => {
-    const { container } = render(
-      <ArticleDetail
-        article={{ ...article, content: '<script>alert(1)</script><p>safe</p>' }}
-        onBack={vi.fn<() => void>()}
-      />,
-    )
+    const { container } = renderDetail({ content: '<script>alert(1)</script><p>safe</p>' })
 
     expect(container.querySelector('script')).toBeNull()
     expect(screen.getByText('safe')).toBeTruthy()
