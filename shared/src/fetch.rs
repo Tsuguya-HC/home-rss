@@ -27,6 +27,134 @@ pub enum FetchAndStoreOutcome {
     StoreFailed(anyhow::Error),
 }
 
+/// 取得だけを行い DB に触れない共有処理。`fetch_and_store` のうち外部 HTTP
+/// とパースだけを切り出したもの。add_feed はこちらをトランザクションの外で
+/// 呼び、保存だけを `in_transaction` の中に入れる。INSERT〜COMMIT の間ずっと
+/// 行ロックを保持すると、fetcher・DELETE・同時追加を外部フェッチの時間だけ
+/// ブロックする (#148 の差し戻し)。正規化済み URL を受け取る: ガード自体は
+/// `fetch_and_store` の入口（#106 R2。add_feed は別に 400 を返す）が担う。
+#[derive(Debug)]
+pub enum FetchOnlyOutcome {
+    /// 304 Not Modified。DB には触れていない。
+    NotModified {
+        etag: Option<String>,
+        last_modified: Option<String>,
+    },
+    /// 取得・パースに成功した。`store_fetched` で保存する材料。
+    Fetched {
+        parsed: ParsedFeed,
+        etag: Option<String>,
+        last_modified: Option<String>,
+    },
+    /// 到達不能・想定外ステータス・タイムアウトなど、取得自体の失敗。
+    FetchFailed(anyhow::Error),
+    /// 本文がフィードとしてパース不能。
+    Unparseable(anyhow::Error),
+}
+
+/// `url` は `reject_internal_feed_url` が返した正規化後の値 (#106 U7)。
+/// `timeout` に `None` を渡すと打ち切らない（定期取得の既存動作をそのまま保つ）。
+/// `Some(duration)` を渡すと send と本文読み取りのそれぞれに duration を課す
+/// （追加直後取得のハング対策 #106。応答を返さないホストへの send は WASI の
+/// outbound HTTP にタイムアウト API が無いため、放置すると無期限に待ち続ける。
+/// 値は server/src/lib.rs の `FETCH_TIMEOUT` を参照）。
+pub async fn fetch_only(
+    url: &url::Url,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+    timeout: Option<Duration>,
+) -> FetchOnlyOutcome {
+    let url = url.as_str();
+    let mut builder = Request::get(url).header("user-agent", "home-rss-fetcher/0.1");
+    if let Some(etag) = etag {
+        builder = builder.header("if-none-match", etag);
+    }
+    if let Some(lm) = last_modified {
+        builder = builder.header("if-modified-since", lm);
+    }
+    let req = match builder.body(EmptyBody::new()) {
+        Ok(r) => r,
+        Err(e) => {
+            return FetchOnlyOutcome::FetchFailed(anyhow::anyhow!(
+                "failed to build request for {url}: {e:#}"
+            ));
+        }
+    };
+
+    let resp: Response = match await_with_optional_timeout(timeout, send(req)).await {
+        Some(Ok(r)) => r,
+        Some(Err(e)) => {
+            return FetchOnlyOutcome::FetchFailed(anyhow::anyhow!(
+                "request failed for {url}: {e:#}"
+            ));
+        }
+        None => {
+            return FetchOnlyOutcome::FetchFailed(anyhow::anyhow!("request timed out for {url}"));
+        }
+    };
+
+    match classify_status(resp.status()) {
+        // last_fetched_at は本文を取得して保存した時刻 (#106 U5)。304 は
+        // store_fetched() を呼ばずにここで早期リターンするので更新されない
+        // （旧実装からの既存動作であり、この diff での退行ではない。issue
+        // #106 (c) の要求により定期取得の挙動は変えない）。この列を
+        // 「取得が滞っているフィード」の検出にそのまま使うと、304 が
+        // 続いている（＝正常に最新のまま）フィードを誤検知するので注意。
+        StatusOutcome::NotModified => {
+            return FetchOnlyOutcome::NotModified {
+                etag: header_string(&resp, "etag"),
+                last_modified: header_string(&resp, "last-modified"),
+            };
+        }
+        StatusOutcome::Unexpected(status) => {
+            return FetchOnlyOutcome::FetchFailed(anyhow::anyhow!("HTTP {status} fetching {url}"));
+        }
+        StatusOutcome::Ok => {}
+    }
+
+    let new_etag = header_string(&resp, "etag");
+    let new_last_modified = header_string(&resp, "last-modified");
+
+    let body = match await_with_optional_timeout(timeout, resp.into_body().bytes()).await {
+        Some(Ok(b)) => b,
+        Some(Err(e)) => {
+            return FetchOnlyOutcome::FetchFailed(anyhow::anyhow!(
+                "failed to read body for {url}: {e:#}"
+            ));
+        }
+        None => {
+            return FetchOnlyOutcome::FetchFailed(anyhow::anyhow!(
+                "timed out reading body for {url}"
+            ));
+        }
+    };
+
+    match parse_feed_bytes(body.as_ref()) {
+        Ok(parsed) => FetchOnlyOutcome::Fetched {
+            parsed,
+            etag: new_etag,
+            last_modified: new_last_modified,
+        },
+        Err(e) => FetchOnlyOutcome::Unparseable(anyhow::anyhow!(
+            "feed at {url} could not be parsed: {e:#}"
+        )),
+    }
+}
+
+/// `fetch_only` が持ち帰ったパース結果の保存。記事 INSERT と `feeds` UPDATE
+/// を行う。呼び出し側のトランザクションの中で呼ぶことを想定する。
+/// 304（`FetchOnlyOutcome::NotModified`）は保存するものが無いのでここには
+/// 来ない。呼び出し側で分岐すること。
+pub async fn store_fetched(
+    conn: &Connection,
+    feed_id: &str,
+    parsed: &ParsedFeed,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) -> Result<Feed> {
+    store(conn, feed_id, parsed, etag, last_modified).await
+}
+
 /// `timeout` に `None` を渡すと打ち切らない（定期取得の既存動作をそのまま保つ）。
 /// `Some(duration)` を渡すと send と本文読み取りのそれぞれに duration を課す
 /// （追加直後取得のハング対策 #106。応答を返さないホストへの send は WASI の
@@ -50,7 +178,7 @@ pub async fn fetch_and_store(
     // (#106 U7): 生の入力文字列のままだと、Url::parse は通すが http::Uri
     // （実際に fetch に使う側）は拒否する先頭空白・末尾改行等がガードを
     // 素通りしたまま feeds 行だけ作られ、以後ここが永遠に失敗し続ける。
-    let url = match reject_internal_feed_url(url) {
+    let normalized = match reject_internal_feed_url(url) {
         Ok(normalized) => normalized,
         Err(reason) => {
             // "SSRF guard rejected" は Loki で検索できる固定文字列 (#106 U3)。
@@ -62,89 +190,26 @@ pub async fn fetch_and_store(
         }
     };
 
-    let mut builder = Request::get(url.as_str()).header("user-agent", "home-rss-fetcher/0.1");
-    if let Some(etag) = etag {
-        builder = builder.header("if-none-match", etag);
-    }
-    if let Some(lm) = last_modified {
-        builder = builder.header("if-modified-since", lm);
-    }
-    let req = match builder.body(EmptyBody::new()) {
-        Ok(r) => r,
-        Err(e) => {
-            return FetchAndStoreOutcome::FetchFailed(anyhow::anyhow!(
-                "failed to build request for {url}: {e:#}"
-            ));
-        }
-    };
-
-    let resp: Response = match await_with_optional_timeout(timeout, send(req)).await {
-        Some(Ok(r)) => r,
-        Some(Err(e)) => {
-            return FetchAndStoreOutcome::FetchFailed(anyhow::anyhow!(
-                "request failed for {url}: {e:#}"
-            ));
-        }
-        None => {
-            return FetchAndStoreOutcome::FetchFailed(anyhow::anyhow!(
-                "request timed out for {url}"
-            ));
-        }
-    };
-
-    match classify_status(resp.status()) {
-        // last_fetched_at は本文を取得して保存した時刻 (#106 U5)。304 は
-        // store() を呼ばずにここで早期リターンするので更新されない
-        // （旧実装からの既存動作であり、この diff での退行ではない。issue
-        // #106 (c) の要求により定期取得の挙動は変えない）。この列を
-        // 「取得が滞っているフィード」の検出にそのまま使うと、304 が
-        // 続いている（＝正常に最新のまま）フィードを誤検知するので注意。
-        StatusOutcome::NotModified => return FetchAndStoreOutcome::NotModified,
-        StatusOutcome::Unexpected(status) => {
-            return FetchAndStoreOutcome::FetchFailed(anyhow::anyhow!(
-                "HTTP {status} fetching {url}"
-            ));
-        }
-        StatusOutcome::Ok => {}
-    }
-
-    let new_etag = header_string(&resp, "etag");
-    let new_last_modified = header_string(&resp, "last-modified");
-
-    let body = match await_with_optional_timeout(timeout, resp.into_body().bytes()).await {
-        Some(Ok(b)) => b,
-        Some(Err(e)) => {
-            return FetchAndStoreOutcome::FetchFailed(anyhow::anyhow!(
-                "failed to read body for {url}: {e:#}"
-            ));
-        }
-        None => {
-            return FetchAndStoreOutcome::FetchFailed(anyhow::anyhow!(
-                "timed out reading body for {url}"
-            ));
-        }
-    };
-
-    let parsed = match parse_feed_bytes(body.as_ref()) {
-        Ok(f) => f,
-        Err(e) => {
-            return FetchAndStoreOutcome::Unparseable(anyhow::anyhow!(
-                "feed at {url} could not be parsed: {e:#}"
-            ));
-        }
-    };
-
-    match store(
-        conn,
-        feed_id,
-        &parsed,
-        new_etag.as_deref(),
-        new_last_modified.as_deref(),
-    )
-    .await
-    {
-        Ok(feed) => FetchAndStoreOutcome::Stored(feed),
-        Err(e) => FetchAndStoreOutcome::StoreFailed(e),
+    match fetch_only(&normalized, etag, last_modified, timeout).await {
+        FetchOnlyOutcome::NotModified { .. } => FetchAndStoreOutcome::NotModified,
+        FetchOnlyOutcome::FetchFailed(e) => FetchAndStoreOutcome::FetchFailed(e),
+        FetchOnlyOutcome::Unparseable(e) => FetchAndStoreOutcome::Unparseable(e),
+        FetchOnlyOutcome::Fetched {
+            parsed,
+            etag,
+            last_modified,
+        } => match store(
+            conn,
+            feed_id,
+            &parsed,
+            etag.as_deref(),
+            last_modified.as_deref(),
+        )
+        .await
+        {
+            Ok(feed) => FetchAndStoreOutcome::Stored(feed),
+            Err(e) => FetchAndStoreOutcome::StoreFailed(e),
+        },
     }
 }
 

@@ -35,7 +35,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 | fetcher（`/fetch`） | R（`id, url, etag, last_modified` の全行）→ フィードごとに W | W | |
 | cleaner（`/clean`） | | D（既読かつ古いもの） | 連鎖で D |
 
-即時取得と fetcher の書き込みは同じ `shared/src/fetch.rs` の `fetch_and_store()` が行う。
+即時取得と fetcher の取得は同じ `shared/src/fetch.rs` の `fetch_only()` が行い、保存は同じ `store()` を `store_fetched()` / `fetch_and_store()` 経由で呼ぶ。
 
 - 取得前に `reject_internal_feed_url()` を毎回通す。弾かれたら何も書かない
 - 条件付き GET（`If-None-Match` / `If-Modified-Since`）。**200 のときだけ**書く。304 と失敗では DB に触れない
@@ -45,8 +45,8 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 列ごとの書き手:
 
 - `feeds.url`: 追加と OPML インポートだけ。保存するのは `reject_internal_feed_url()` が返した正規化後の URL
-- `feeds` のそれ以外: `fetch_and_store()` の 200 のときだけ
-- `articles`: `fetch_and_store()` の INSERT だけ。UPDATE する経路は無い
+- `feeds` のそれ以外: 200 のときの `store()` だけ（即時取得は `store_fetched()` 経由、fetcher は `fetch_and_store()` 経由）
+- `articles`: `store()` の INSERT だけ（経路は同上）。UPDATE する経路は無い
 - `read_status`: 既読 API と全既読 API だけ
 
 ### UI の画面操作と API
@@ -82,15 +82,15 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 
 ### server の即時取得
 
-- `POST /api/feeds` の中で、追加（または既存）の 1 フィードだけを `fetch_and_store()` する
+- `POST /api/feeds` の中で、追加（または既存）の 1 フィードだけを取得する。取得は `fetch_only()` でトランザクションの外、保存は `store_fetched()` で `shared::tx::in_transaction` の 1 トランザクションの中。取得中は行ロックを取らないので fetcher・DELETE・同時追加を待たせない
 - 送信と本文読み取りのそれぞれを 15 秒で打ち切る（WASI の outbound HTTP にタイムアウトが無いため）
 - 応答: 取得して保存できたら 201 と取得後の行、取得失敗 502、パース不能 422、保存失敗 500、JSON 不正と URL の拒否は 400（DB に触れない）
-- 取得に失敗しても `feeds` の行は残る
+- 取得・パースの失敗ではトランザクションを始めず、新規の行は残らない。保存（INSERT と記事・`feeds` の書き込み）の失敗では新規の行は ROLLBACK され、何も残らない。既存の行への再追加は保存の失敗でも COMMIT して残し、行を変えない
 
 ### トランザクション
 
-- コードに `BEGIN` は無い。どの SQL 文も単独で自動コミットされる
-- 接続はリクエスト（fetcher / cleaner は 1 回分）ごとに `db::connect()` で開く
+- `POST /api/feeds` の保存（INSERT と `store_fetched()` の書き込み）だけが `shared::tx::in_transaction` で BEGIN〜COMMIT/ROLLBACK する。他の SQL 文は単独で自動コミットされる
+- 接続は保存の直前（取得の後）にリクエストごとに `db::connect()` で開く。取得の失敗では接続もトランザクションも作らない
 - `fetch_and_store()` の記事 INSERT と `feeds` UPDATE は別の文で、その間に他の経路が入りうる。記事 INSERT は 1 文なので、1 回分の記事は全部入るか全部入らないか
 - OPML インポートは URL ごとに別の INSERT。途中で DB エラーになると、それまでの行は残って 500 を返す
 
@@ -99,7 +99,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 | 組み合わせ | 起きること |
 |---|---|
 | 同じフィードの fetcher と即時取得（または fetcher 2 つ） | 記事は UNIQUE(`feed_id`, `url`) と `ON CONFLICT DO NOTHING` で重複しない。`feeds` の `title` / `etag` などは後から UPDATE した方が残る |
-| 取得中にそのフィードを `DELETE` | 削除後の記事 INSERT は外部キー違反で失敗する。INSERT と UPDATE の間に消えると、記事は連鎖で消え、UPDATE が 0 行で失敗する。どちらも fetcher ではログだけ、即時取得では 500 |
+| 取得中にそのフィードを `DELETE` | 即時取得は取得中に行ロックを取らないので、取得中の DELETE は待たずに実行される。DELETE が INSERT より先なら INSERT が新規行を作り直して保存は成功し 201 を返す（残骸になる。再追加の取得は終わっているので取り直さない）。INSERT と保存の書き込みは 1 トランザクションで行ロックを保持するので、その間に来た DELETE は COMMIT/ROLLBACK まで待ってから実行されるだけ |
 | cleaner が消した記事がまだフィードに載っている | 次に 200 が返ると UNIQUE に当たらないので、**未読の新しい行として入り直す**（304 なら入らない） |
 | cleaner / フィード削除で消えた記事を UI で開く | 既読 API が外部キー違反で 500。UI は再読み込みまで消えた記事を表示し続け、開くたびに既読 API を呼ぶ |
 | 全既読と fetcher / 即時取得 | 全既読の文より後に入った記事は未読のまま残る。UI は未読数を 0 にするので、次の読み直しまで表示とずれる |
@@ -121,6 +121,8 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 
 - 追加するとその場でそのフィードだけ取得し、成功なら 201 と取得後の行（タイトル等が入ったもの）を返す — `server/src/lib.rs`: `fetched_feed_returns_created`, `fetched_response_body_reflects_updated_feed`（応答への写像だけ。取得から応答までの通しはテスト無し）
 - 取得失敗とパース不能は 201 にしない。保存失敗は 502 ではなく 500 — `server/src/lib.rs`: `fetch_failure_is_surfaced_not_created`, `unparseable_feed_is_surfaced_not_created`, `store_failure_is_surfaced_as_server_error_not_bad_gateway`（502 / 422 という値そのものはテスト無し）
+- 新規の追加が失敗したら `feeds` の行も記事も残さない — e2e: `adding_a_feed_whose_first_fetch_fails_leaves_no_feed_behind`。失敗が新規行だけを取り消す条件分岐は `server/src/lib.rs`: `only_failed_adds_of_new_feeds_roll_back`
+- 既存のフィードへの再追加が失敗しても、その行を消したり変えたりしない — e2e: `readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged`（`SET title = NULL` への変異で落ちることを確認済み）
 - 同じ URL を再度追加しても行は増えず、既存行を取得し直して返す — テスト無し
 - 即時取得は送信と本文の読み取りをそれぞれ 15 秒で打ち切り（合計で最大約 30 秒）、定期取得は打ち切らない — `shared/src/fetch.rs`: `returns_some_when_future_resolves_before_timeout`, `returns_none_when_timeout_resolves_first`, `none_timeout_returns_the_future_result_without_racing`
 - UI の追加の待ち時間（45 秒）は、即時取得の打ち切り 2 回分と 10 秒の余裕以上 — `server/src/lib.rs`: `fetch_timeout_is_positive_and_matches_ui_expectation`（UI 側の 45 はテストの中の定数）、`ui/src/api.test.ts`: `gives adding a feed 45 seconds before timing out`（`ui/src/api.ts` の値を経由する）
