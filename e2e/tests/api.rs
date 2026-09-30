@@ -230,6 +230,61 @@ async fn adding_a_feed_whose_first_fetch_fails_leaves_no_feed_behind() {
 }
 
 #[tokio::test]
+async fn deleting_a_feed_is_not_blocked_by_a_concurrent_failing_readd() {
+    // Pins the non-blocking shape of #148's fix: the re-add fetches outside
+    // any transaction, so nothing holds the row's lock while the fetch hangs.
+    // 203.0.0.1 (TEST-NET-3) is unreachable, so the fetch hangs until the
+    // server's 15s send timeout (measured 15.0s through Spin, 2026-09-30).
+    // Before the fix the re-add's INSERT..ON CONFLICT held the lock across
+    // the whole fetch and DELETE waited ~15s; fixed, it answers in well
+    // under that.
+    let db = fresh_db().await;
+    let url = "https://203.0.0.1/concurrent-readd-feed";
+    let id: String = db
+        .query_one(
+            "INSERT INTO feeds (url) VALUES ($1) RETURNING id::text",
+            &[&url],
+        )
+        .await
+        .expect("seed feed")
+        .get(0);
+    let body = format!(r#"{{"url":"{url}"}}"#);
+
+    let server_url = server("/api/feeds");
+    let readd = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(server_url)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .expect("POST re-add")
+            .status()
+            .as_u16()
+    });
+    // Give the re-add a head start into its ~15s fetch so the DELETE lands
+    // while the fetch is still hanging. Fixed, the DELETE answers without
+    // waiting for the fetch either way.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let start = std::time::Instant::now();
+    let status = delete(&format!("/api/feeds/{id}")).await;
+    let elapsed = start.elapsed();
+    assert_eq!(status, 204);
+    // The fetch hangs ~15s; a DELETE that waits for it lands at 10s+. Fixed,
+    // the DELETE never touches the locked row's wait queue. 5s keeps clear of
+    // both the failure mode and normal jitter.
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "DELETE waited {elapsed:?} for a concurrent re-add's fetch"
+    );
+    // A re-add that started from the same pre-existing row must keep it, so
+    // the DELETE is last and the feed is gone either way.
+    assert_eq!(readd.await.expect("re-add task"), 502);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
+}
+
+#[tokio::test]
 async fn readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged() {
     // Guards the naive fix for the test above: deleting the feed row when the
     // first fetch fails would also wipe a feed that was already registered.
