@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use spin_sdk::pg::{Certificate, Connection, OpenOptions};
 
 pub async fn connect() -> Result<Connection> {
@@ -23,6 +23,29 @@ pub async fn connect() -> Result<Connection> {
     };
     let conn = Connection::open_with_options(&address, options).await?;
     Ok(conn)
+}
+
+pub async fn in_transaction<'a, T, F, Fut>(conn: &'a Connection, f: F) -> Result<T>
+where
+    F: FnOnce(&'a Connection) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    conn.execute("BEGIN", vec![])
+        .await
+        .context("failed to begin transaction")?;
+    match f(conn).await {
+        Ok(value) => {
+            conn.execute("COMMIT", vec![])
+                .await
+                .context("failed to commit transaction")?;
+            Ok(value)
+        }
+        Err(e) => {
+            // ROLLBACK 自体の失敗を返すと元の失敗が隠れるので捨てる。
+            let _ = conn.execute("ROLLBACK", vec![]).await;
+            Err(e)
+        }
+    }
 }
 
 fn force_sslmode_require(url: &str) -> String {

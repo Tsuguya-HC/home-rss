@@ -210,6 +210,60 @@ async fn adding_a_feed_rejects_urls_the_fetcher_must_not_reach() {
 }
 
 #[tokio::test]
+async fn adding_a_feed_whose_first_fetch_fails_leaves_no_row() {
+    let db = fresh_db().await;
+    // SSRF ガードは通る（https・443・公開ホスト相当）が DNS が解決し得ない
+    // (.invalid) ため、即時取得はネットワークに触れず失敗する。#148:
+    // 502 を返しても feeds 行を残してはならない。
+    let body = r#"{"url":"https://example.invalid/feed"}"#;
+    assert_eq!(post("/api/feeds", Some(body)).await, 502);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
+
+    // 同じ URL の再追加は初回と同じ失敗になり、行も増えない。残骸行が
+    // ON CONFLICT に当たって成功扱い（記事 0 件の行を返す）になっては、
+    // 原因の解消後に追加し直しても直らない。
+    assert_eq!(post("/api/feeds", Some(body)).await, 502);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
+}
+
+#[tokio::test]
+async fn failing_to_refetch_an_existing_feed_keeps_the_existing_row() {
+    let db = fresh_db().await;
+    let id = seed_feed(&db, "https://example.invalid/keep-me").await;
+    db.execute(
+        "UPDATE feeds SET title = 'Keep me', site_url = 'https://example.invalid/' \
+         WHERE id = $1::text::uuid",
+        &[&id],
+    )
+    .await
+    .expect("set title");
+    // 登録済み URL の再取得が失敗しても、既存行は残り内容も変わらない。
+    // 取得失敗時に feed 行を消す安易な直し方をするとここが落ちる。
+    assert_eq!(
+        post(
+            "/api/feeds",
+            Some(r#"{"url":"https://example.invalid/keep-me"}"#)
+        )
+        .await,
+        502
+    );
+    let row = db
+        .query_one(
+            "SELECT url, title, site_url FROM feeds WHERE id = $1::text::uuid",
+            &[&id],
+        )
+        .await
+        .expect("existing feed survives a failed refetch");
+    let url: String = row.get(0);
+    let title: Option<String> = row.get(1);
+    let site_url: Option<String> = row.get(2);
+    assert_eq!(url, "https://example.invalid/keep-me");
+    assert_eq!(title.as_deref(), Some("Keep me"));
+    assert_eq!(site_url.as_deref(), Some("https://example.invalid/"));
+}
+
+#[tokio::test]
 async fn cleaner_deletes_only_read_articles_past_retention() {
     let db = fresh_db().await;
     let feed = seed_feed(&db, "https://a.example/feed").await;

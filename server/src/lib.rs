@@ -70,6 +70,22 @@ enum ImmediateFetchOutcome {
     StoreFailed,
 }
 
+#[derive(Debug)]
+struct AbortAdd(ImmediateFetchOutcome);
+
+impl std::fmt::Display for AbortAdd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "immediate fetch did not store")
+    }
+}
+
+impl std::error::Error for AbortAdd {}
+
+enum AddDone {
+    Fetched(Feed),
+    Existing(ImmediateFetchOutcome),
+}
+
 fn immediate_fetch_response(outcome: &ImmediateFetchOutcome) -> Resp {
     match outcome {
         ImmediateFetchOutcome::Fetched(feed) => match serde_json::to_string(feed) {
@@ -161,29 +177,47 @@ async fn add_feed(req: Request) -> Result<Resp> {
     };
 
     let conn = db::connect().await?;
-    let rows = conn
-        .query(
-            "INSERT INTO feeds (url) VALUES ($1) \
-             ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
-             RETURNING id::text, url, title, site_url, etag, last_modified, \
-             EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
-            vec![ParameterValue::Str(url.to_string())],
-        )
-        .await?
-        .collect()
-        .await?;
+    let url = url.to_string();
+    let outcome = db::in_transaction(&conn, |conn| async move {
+        let rows = conn
+            .query(
+                "INSERT INTO feeds (url) VALUES ($1) \
+                 ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
+                 RETURNING id::text, url, title, site_url, etag, last_modified, \
+                 EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
+                 EXTRACT(EPOCH FROM created_at)::bigint, \
+                 (xmax = 0) AS inserted",
+                vec![ParameterValue::Str(url.clone())],
+            )
+            .await?
+            .collect()
+            .await?;
 
-    match rows.first() {
-        Some(row) => {
-            let feed = row_to_feed(row)?;
-            let outcome = immediate_fetch(&conn, &feed).await;
-            Ok(immediate_fetch_response(&outcome))
+        let (feed, inserted) = match rows.first() {
+            Some(row) => (
+                row_to_feed(row)?,
+                Decode::decode(&row[8]).map(|inserted: bool| inserted)?,
+            ),
+            None => anyhow::bail!("failed to insert feed"),
+        };
+        match immediate_fetch(conn, &feed).await {
+            ImmediateFetchOutcome::Fetched(feed) => Ok(AddDone::Fetched(feed)),
+            // 既存行は UPDATE していない（url = 自身への代入）ので、失敗しても
+            // 巻き戻すものは何も無い。COMMIT して既存行の応答をそのまま返す。
+            outcome if !inserted => Ok(AddDone::Existing(outcome)),
+            outcome => Err(AbortAdd(outcome).into()),
         }
-        None => Ok(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to insert feed",
+    })
+    .await;
+    match outcome {
+        Ok(AddDone::Fetched(feed)) => Ok(immediate_fetch_response(
+            &ImmediateFetchOutcome::Fetched(feed),
         )),
+        Ok(AddDone::Existing(outcome)) => Ok(immediate_fetch_response(&outcome)),
+        Err(e) => match e.downcast::<AbortAdd>() {
+            Ok(abort) => Ok(immediate_fetch_response(&abort.0)),
+            Err(e) => Err(e),
+        },
     }
 }
 
@@ -199,7 +233,8 @@ const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// フィード追加直後の即時取得 (#106)。取得〜保存の実処理は
 /// home_rss_shared::fetch::fetch_and_store に一本化されており、定期取得
-/// (fetcher) と同じコードを通る。失敗しても追加自体は残す。
+/// (fetcher) と同じコードを通る。新規追加の失敗は add_feed が ROLLBACK し、
+/// 行も記事も残さない (#148)。
 async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> ImmediateFetchOutcome {
     match fetch_and_store(conn, &feed.id, &feed.url, None, None, Some(FETCH_TIMEOUT)).await {
         FetchAndStoreOutcome::Stored(updated) => ImmediateFetchOutcome::Fetched(updated),

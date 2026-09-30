@@ -89,8 +89,8 @@ export default function App() {
 
   const handleAddFeed = async (url: string) => {
     await withError(async () => {
-      // 即時取得に失敗してもフィード行自体は DB に残るため、
-      // エラー時も一覧を更新して「登録済み」が見えるようにする。
+      // 追加に失敗しても一覧の状態が変わっていることがあるため（既存 URL
+      // の再取得失敗は 502 でも既存行が残る）、エラー時も一覧を更新する。
       let addFeedError: unknown = null
       try {
         await api.addFeed(url)
