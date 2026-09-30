@@ -210,6 +210,59 @@ async fn adding_a_feed_rejects_urls_the_fetcher_must_not_reach() {
 }
 
 #[tokio::test]
+async fn adding_a_feed_whose_first_fetch_fails_leaves_no_feed_behind() {
+    // Catches an add without rollback: the feed row is inserted before the
+    // first fetch runs, so a fetch failure must undo the insert instead of
+    // leaving a zero-article row behind (#148 started from such a leftover,
+    // left by a feed answering 302, that had to be deleted by hand).
+    // `.invalid` never resolves, so the fetch fails without touching an
+    // external network, and fast (about 90ms through Spin, measured 2026-09-30
+    // by POSTing this URL to a local `spin up`).
+    let db = fresh_db().await;
+    let body = r#"{"url":"https://no-such-feed.invalid/feed"}"#;
+    assert_eq!(post("/api/feeds", Some(body)).await, 502);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 0);
+    // Retrying the same URL must look like a fresh add: no rows pile up and
+    // nothing left by the first attempt gets in the way.
+    assert_eq!(post("/api/feeds", Some(body)).await, 502);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 0);
+}
+
+#[tokio::test]
+async fn readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged() {
+    // Guards the naive fix for the test above: deleting the feed row when the
+    // first fetch fails would also wipe a feed that was already registered.
+    // The same never-resolving `.invalid` URL fails the re-add's fetch.
+    let db = fresh_db().await;
+    let url = "https://no-such-feed.invalid/feed";
+    let id = seed_feed(&db, url).await;
+    db.execute(
+        "UPDATE feeds SET title = $1 WHERE id = $2::text::uuid",
+        &[&"Original Title", &id],
+    )
+    .await
+    .expect("set feed title");
+    seed_article(&db, &id, "kept", 1).await;
+
+    let body = format!(r#"{{"url":"{url}"}}"#);
+    assert_eq!(post("/api/feeds", Some(&body)).await, 502);
+
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 1);
+    let row = db
+        .query_one("SELECT id::text, url, title FROM feeds", &[])
+        .await
+        .expect("read feed");
+    let kept_id: String = row.get(0);
+    let kept_url: String = row.get(1);
+    let kept_title: Option<String> = row.get(2);
+    assert_eq!(kept_id, id);
+    assert_eq!(kept_url, url);
+    assert_eq!(kept_title.as_deref(), Some("Original Title"));
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 1);
+}
+
+#[tokio::test]
 async fn cleaner_deletes_only_read_articles_past_retention() {
     let db = fresh_db().await;
     let feed = seed_feed(&db, "https://a.example/feed").await;

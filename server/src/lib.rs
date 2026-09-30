@@ -4,6 +4,7 @@ use home_rss_shared::fetch::{FetchAndStoreOutcome, decode_feed_row, fetch_and_st
 use home_rss_shared::http::{Resp, empty, json};
 use home_rss_shared::models::{Article, CreateFeedRequest, Feed};
 use home_rss_shared::ssrf::reject_internal_feed_url;
+use home_rss_shared::tx::{TxOutcome, in_transaction};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use spin_sdk::http::body::IncomingBodyExt;
@@ -160,31 +161,44 @@ async fn add_feed(req: Request) -> Result<Resp> {
         Err(msg) => return Ok(error_response(StatusCode::BAD_REQUEST, msg)),
     };
 
+    // 追加と即時取得は 1 トランザクション (#148)。新規の行は取得失敗で
+    // ROLLBACK され、既存の行は取得失敗でも COMMIT して残す（行を変えない）。
+    // 既存か新規かは行の有無ではなく `xmax = 0`（= 挿入された行）で見分ける。
+    // INSERT への変更は `readding_an_existing_feed_that_fails_to_fetch` の
+    // 変異検出の当て先なので、文面を変えるときはその変異の当て直しも要る。
     let conn = db::connect().await?;
-    let rows = conn
-        .query(
-            "INSERT INTO feeds (url) VALUES ($1) \
-             ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
-             RETURNING id::text, url, title, site_url, etag, last_modified, \
-             EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
-            vec![ParameterValue::Str(url.to_string())],
-        )
-        .await?
-        .collect()
-        .await?;
+    let url = url.to_string();
+    let outcome = in_transaction(&conn, async {
+        let rows = conn
+            .query(
+                "INSERT INTO feeds (url) VALUES ($1) \
+                 ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
+                 RETURNING id::text, url, title, site_url, etag, last_modified, \
+                 EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
+                 EXTRACT(EPOCH FROM created_at)::bigint, (xmax::text = '0')",
+                vec![ParameterValue::Str(url.clone())],
+            )
+            .await?
+            .collect()
+            .await?;
 
-    match rows.first() {
-        Some(row) => {
-            let feed = row_to_feed(row)?;
-            let outcome = immediate_fetch(&conn, &feed).await;
-            Ok(immediate_fetch_response(&outcome))
+        let row = rows.first().ok_or_else(|| {
+            anyhow::anyhow!("INSERT INTO feeds RETURNING returned no rows for {url}")
+        })?;
+        let is_new = bool::decode(&row[8])?;
+        let feed = row_to_feed(row)?;
+        let outcome = immediate_fetch(&conn, &feed).await;
+        // 新規行の失敗（取得・パース・保存のいずれも）は残骸になるので
+        // ROLLBACK する。既存行は前からある行なので COMMIT して残す
+        // （行を変えない）。
+        if should_rollback(is_new, &outcome) {
+            Ok(TxOutcome::Rollback(outcome))
+        } else {
+            Ok(TxOutcome::Commit(outcome))
         }
-        None => Ok(error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to insert feed",
-        )),
-    }
+    })
+    .await?;
+    Ok(immediate_fetch_response(&outcome))
 }
 
 /// ハング対策 (#106): 応答を返さないホストへの send はタイムアウト無しに待ち続ける。
@@ -195,11 +209,18 @@ async fn add_feed(req: Request) -> Result<Resp> {
 /// 余裕を足した値を前提にしている (#106 R8/U9、
 /// `fetch_timeout_is_positive_and_matches_ui_expectation` で検査)。
 /// ここを変えたら `ADD_FEED_TIMEOUT_MS` とそのコメントも見直すこと。
+/// 失敗した追加を取り消す条件の純粋部分。新規行の失敗だけ ROLLBACK し、
+/// 成功と既存行の失敗は COMMIT する（既存行は前からある行なので残す）。
+fn should_rollback(is_new: bool, outcome: &ImmediateFetchOutcome) -> bool {
+    is_new && !matches!(outcome, ImmediateFetchOutcome::Fetched(_))
+}
+
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// フィード追加直後の即時取得 (#106)。取得〜保存の実処理は
 /// home_rss_shared::fetch::fetch_and_store に一本化されており、定期取得
-/// (fetcher) と同じコードを通る。失敗しても追加自体は残す。
+/// (fetcher) と同じコードを通る。新規行の取得失敗は呼び出し元が
+/// ROLLBACK する (#148) ので、ここでは行を消さず結果だけ返す。
 async fn immediate_fetch(conn: &spin_sdk::pg::Connection, feed: &Feed) -> ImmediateFetchOutcome {
     match fetch_and_store(conn, &feed.id, &feed.url, None, None, Some(FETCH_TIMEOUT)).await {
         FetchAndStoreOutcome::Stored(updated) => ImmediateFetchOutcome::Fetched(updated),
@@ -554,6 +575,31 @@ mod tests {
             spin_sdk::http::StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_ne!(resp.status(), spin_sdk::http::StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn only_failed_adds_of_new_feeds_roll_back() {
+        use super::{ImmediateFetchOutcome, should_rollback};
+        // 成功は新規・既存どちらの行も残す。
+        assert!(!should_rollback(
+            true,
+            &ImmediateFetchOutcome::Fetched(test_feed())
+        ));
+        assert!(!should_rollback(
+            false,
+            &ImmediateFetchOutcome::Fetched(test_feed())
+        ));
+        // 新規行の失敗は残骸になるので取り消す。既存行の失敗は前からある
+        // 行なので残す（e2e の `readding_an_existing_feed_that_fails_to_fetch`
+        // が守る振る舞いと同じ。反転するとその e2e が落ちる）。
+        for outcome in [
+            ImmediateFetchOutcome::FetchFailed,
+            ImmediateFetchOutcome::Unparseable,
+            ImmediateFetchOutcome::StoreFailed,
+        ] {
+            assert!(should_rollback(true, &outcome));
+            assert!(!should_rollback(false, &outcome));
+        }
     }
 
     #[test]
