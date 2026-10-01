@@ -399,6 +399,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "home-rss-repo-checks"
+version = "0.1.0"
+
+[[package]]
 name = "home-rss-server"
 version = "0.1.0"
 dependencies = [
