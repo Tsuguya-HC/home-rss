@@ -54,6 +54,7 @@ jobs:
       pull-requests: read # dorny/paths-filter が PR の変更ファイル一覧を API 取得するために必要
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      checks: ${{ steps.filter.outputs.checks }}
       e2e: ${{ steps.filter.outputs.e2e }}
       ui: ${{ steps.filter.outputs.ui }}
       workflows: ${{ steps.filter.outputs.workflows }}
@@ -72,12 +73,18 @@ jobs:
               - 'fetcher/**'
               - 'cleaner/**'
               - 'shared/**'
-              - 'repo-checks/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
               - '.github/workflows/_build-rust.yml'
               - '.github/workflows/_test.yml'
+            # test だけを起こす。`rust` に足すと、どのサービスにも入らない変更で build-rust まで起動する。
+            # e2e/** は入れない — e2e の leaf が scripts/test.sh ごと回すので二重になる。
+            checks:
+              - 'repo-checks/**'
+              - 'docs/**'
+              - 'ui/**/*.test.ts'
+              - 'ui/**/*.test.tsx'
             e2e:
               - 'server/**'
               - 'cleaner/**'
@@ -115,7 +122,7 @@ jobs:
 
   test:
     needs: detect
-    if: ${{ needs.detect.outputs.rust == 'true' }}
+    if: ${{ needs.detect.outputs.rust == 'true' || needs.detect.outputs.checks == 'true' }}
     uses: ./.github/workflows/_test.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
