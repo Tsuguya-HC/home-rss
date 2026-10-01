@@ -13,6 +13,8 @@ cargo fmt --manifest-path e2e/Cargo.toml --check
 cargo clippy --workspace --all-targets --target "$host" -- -D warnings
 cargo clippy --manifest-path e2e/Cargo.toml --all-targets --target "$host" -- -D warnings
 cargo test --workspace --target "$host"
+# The spec cites pinning tests by name; fail when a cited name no longer exists.
+cargo test -p home-rss-shared --target "$host" --test spec_refs checked_out_spec_has_no_missing_tests
 
 (
   cd ui

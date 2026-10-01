@@ -5,6 +5,7 @@ pub mod feed;
 pub mod fetch;
 pub mod http;
 pub mod models;
+pub mod spec_refs;
 #[cfg(feature = "feed")]
 pub mod ssrf;
 pub mod tx;
