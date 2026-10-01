@@ -103,6 +103,12 @@ fn backticked_name_without_test_file_path_is_ignored() {
 }
 
 #[test]
+fn slashless_rs_filename_is_not_a_citation() {
+    let line = "- text — `lib.rs`: `some_test`";
+    assert!(parse_spec_citations(line).is_empty());
+}
+
+#[test]
 fn prose_with_only_test_dir_path_is_ignored() {
     let spec = "テストの場所は、Rust の単体テストと `shared/tests/` の統合テストがファイル名。\n";
     assert!(parse_spec_citations(spec).is_empty());
@@ -259,6 +265,13 @@ fn vitest_dotted_without_paren_is_ignored() {
 #[test]
 fn underscore_prefixed_e2e_is_not_a_citation() {
     let line = "- text — some_e2e: `adding_a_feed`";
+    let got = parse_spec_citations(line);
+    assert!(got.iter().all(|c| c.file != "e2e/tests/api.rs"));
+}
+
+#[test]
+fn alphanumeric_prefixed_e2e_is_not_a_citation() {
+    let line = "- text — release2e: `some_name`";
     let got = parse_spec_citations(line);
     assert!(got.iter().all(|c| c.file != "e2e/tests/api.rs"));
 }
