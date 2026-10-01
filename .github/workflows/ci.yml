@@ -72,6 +72,7 @@ jobs:
               - 'fetcher/**'
               - 'cleaner/**'
               - 'shared/**'
+              - 'repo-checks/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'

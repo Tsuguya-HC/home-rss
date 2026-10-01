@@ -41,6 +41,7 @@ home-rss/
 ├── fetcher/          # フィード収集 (http trigger、POST /fetch)
 ├── cleaner/          # 古い記事削除 (http trigger、POST /clean)
 ├── shared/           # 共有ライブラリ (DB モデル、型定義、取得+保存、SSRF ガード)
+├── repo-checks/      # リポ自体の検査（docs の引用など）。どのサービスも依存しない
 ├── migrations/       # SQL マイグレーション
 ├── docs/             # network-access.md: CNP と外部アクセス / spec.md: アプリが今どう動くかと守るべき性質
 ├── scripts/          # test.sh: 全部のテスト
@@ -51,7 +52,7 @@ home-rss/
     └── release.yml   # イメージを GHCR push
 ```
 
-Cargo workspace で `shared` クレートを共有。各サービスは独立した Spin app (spin.toml + Cargo.toml)。
+Cargo workspace で `shared` クレートを共有。各サービスは独立した Spin app (spin.toml + Cargo.toml)。`repo-checks` はサービスではなく、どの Spin app にも入らない。
 
 ## 技術スタック
 
@@ -194,6 +195,9 @@ doc コメント（`///`）も同じ。
   有効化するのは server / fetcher だけで、cleaner は引き込まない。ただし
   `cargo test --workspace` は feature unification で全部に効くので、**単体ビルド
   (`cargo build -p ...`) でしか差は出ない**（`shared/Cargo.toml` に実測メモ）
+- **リポ自体を検査するコード**（docs の記述とテストの突き合わせなど）は `repo-checks` に置く。
+  `shared` はサービスが本番で使うライブラリなので入れない。feature で囲わない —
+  `cargo test --workspace` の既定の実行から外れると、その検査は誰にも回されない
 - Spin SDK の PostgreSQL データ型サポートを事前に確認すること (UUID, TIMESTAMPTZ 等)
 
 ### spin-sdk 6.x への移行で踏んだところ
