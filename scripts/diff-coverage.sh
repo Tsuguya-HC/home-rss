@@ -30,13 +30,13 @@ cat >"$tmp_dir/diff_coverage.py" <<'PYEOF'
 import re
 import sys
 
-# The single place holding the static e2e-only rule: Spin-only APIs that unit
-# tests cannot execute on the host. Anything unmatched falls to untested.
+# The static e2e-only rule lives here: Spin-only API names below, plus
+# PG_QUERY_RE for pg calls. Anything unmatched falls to untested.
 SPIN_PATTERNS = ("Connection::open", "variables::get", "http::send", "http_service")
 # `.query(`/`.execute(` with arguments are pg calls; the empty-paren form is the http Uri accessor.
 PG_QUERY_RE = re.compile(r"\.(?:query|execute)\s*\([^)]")
 
-FN_RE = re.compile(r"^\s*(?:pub\s*(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+[A-Za-z_][A-Za-z_0-9]*")
+FN_RE = re.compile(r"^\s*(?:pub\s*(?:\([^)]*\))?\s+)?(?:(?:async|unsafe|const)\s+)*fn\s+[A-Za-z_][A-Za-z_0-9]*")
 ATTR_RE = re.compile(r"^\s*#\[.*\]\s*$")
 RAW_STR_RE = re.compile(r"r(#+)?\"")
 UI_CODE_RE = re.compile(r"\.(m|c)?[tj]sx?$")
@@ -68,6 +68,10 @@ def parse_lcov(path):
 
 # SF paths are tool-relative: llvm-cov emits repo-relative or absolute paths,
 # while vitest emits ui-relative paths, so a ui/ diff path equals "ui/" + SF.
+# Measured 2026-10-01 by running vitest with v8 lcov from the ui directory:
+# `pnpm exec vitest run --coverage --coverage.provider=v8
+# --coverage.reporter=lcov`, whose lcov.info holds `SF:src/api.ts` and other
+# ui-relative paths.
 def is_covered(hits, path, number):
     for (source, line_number), taken in hits.items():
         if line_number != number:
@@ -151,17 +155,24 @@ def function_ranges(lines):
         depth = 0
         opened = False
         end = index
-        # A bodyless fn (trait declaration) ends on its own line: without this
-        # its range leaks into the next unrelated brace.
+        # A bodyless fn (trait declaration) ends its own line with `;` outside
+        # any bracket: without this its range leaks into the next brace.
+        # Bracket depth is tracked because `;` inside an array type
+        # (e.g. `[u8; 32]`) does not end the declaration.
         bodyless = False
+        bracket = 0
         for cursor in range(index, total):
             for char in stripped[cursor]:
-                if char == "{":
+                if char == "[":
+                    bracket += 1
+                elif char == "]":
+                    bracket -= 1
+                elif char == "{":
                     depth += 1
                     opened = True
                 elif char == "}":
                     depth -= 1
-                elif char == ";" and not opened and depth == 0:
+                elif char == ";" and not opened and depth == 0 and bracket == 0:
                     bodyless = True
                     break
             if bodyless:
