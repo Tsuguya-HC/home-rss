@@ -64,7 +64,7 @@ fn check_reports_missing_tests_with_spec_line() {
 #[test]
 fn check_accepts_present_tests() {
     let missing = check_spec("— `server/src/lib.rs`: `here_test`\n", &|_| {
-        Some("fn here_test() {}".to_string())
+        Some("#[test]\nfn here_test() {}".to_string())
     });
     assert!(missing.is_empty());
 }
@@ -186,4 +186,15 @@ fn ignores_test_prefixed_attributes() {
 fn ignores_vitest_calls_followed_by_identifier() {
     let names = vitest_test_names("its('x_ok', () => {});\ntests('y_ok', () => {});");
     assert!(names.is_empty());
+}
+
+#[test]
+fn check_rejects_present_fn_without_test_attribute() {
+    // Catches check_spec accepting a plain fn without #[test] / #[tokio::test] as present.
+    let missing = check_spec("— `server/src/lib.rs`: `renamed_test`\n", &|_| {
+        Some("fn renamed_test() {}".to_string())
+    });
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].path, "server/src/lib.rs");
+    assert_eq!(missing[0].name, "renamed_test");
 }

@@ -246,17 +246,13 @@ pub fn vitest_test_names(source: &str) -> Vec<String> {
     names
 }
 
-fn defines_rust_fn(source: &str, name: &str) -> bool {
-    source
-        .lines()
-        .any(|line| fn_name_in(line).is_some_and(|found| found == name))
-}
-
 pub fn check_spec(spec: &str, load: &dyn Fn(&str) -> Option<String>) -> Vec<MissingRef> {
     let mut missing = Vec::new();
     for cited in parse_spec_refs(spec) {
         let present = match load(&cited.path) {
-            Some(source) if cited.path.ends_with(".rs") => defines_rust_fn(&source, &cited.name),
+            Some(source) if cited.path.ends_with(".rs") => rust_test_names(&source)
+                .iter()
+                .any(|found| found == &cited.name),
             Some(source) => vitest_test_names(&source)
                 .iter()
                 .any(|found| found == &cited.name),
