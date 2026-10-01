@@ -168,7 +168,7 @@ pub fn rust_test_names(source: &str) -> Vec<String> {
             continue;
         }
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
             continue;
         }
         if let Some(name) = fn_name_in(line) {
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn parses_semicolon_separated_groups_without_merging_paths() {
         let refs = parse_spec_refs(
-            "— `server/src/lib.rs`: `a_test`（note）、`ui/src/api.test.ts`: `some ui name`",
+            "— `server/src/lib.rs`: `a_test`（note）; `ui/src/api.test.ts`: `some ui name`",
         );
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].path, "server/src/lib.rs");
@@ -467,5 +467,37 @@ mod tests {
         // Catches rust_test_names disarming on an attribute line between #[test] and fn.
         let names = rust_test_names("#[test]\n#[allow(dead_code)]\nfn through_attr_ok() {}");
         assert!(names.contains(&"through_attr_ok".to_string()));
+    }
+
+    #[test]
+    fn keeps_armed_across_comment_line_before_fn() {
+        // Catches rust_test_names disarming on a comment line between #[test] and fn.
+        let names = rust_test_names("#[test]\n// explains the fixture\nfn comment_ok() {}");
+        assert!(names.contains(&"comment_ok".to_string()));
+    }
+
+    #[test]
+    fn keeps_armed_across_blank_line_before_fn() {
+        // Catches rust_test_names disarming on a blank line between #[test] and fn.
+        let names = rust_test_names("#[test]\n\nfn blank_ok() {}");
+        assert!(names.contains(&"blank_ok".to_string()));
+    }
+
+    #[test]
+    fn check_reports_missing_vitest_names() {
+        // Catches check_spec treating every vitest citation as present.
+        let missing = check_spec("— `ui/src/api.test.ts`: `absent`\n", &|_| {
+            Some("it('present', () => {});".to_string())
+        });
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].path, "ui/src/api.test.ts");
+        assert_eq!(missing[0].name, "absent");
+    }
+
+    #[test]
+    fn ignores_vitest_call_prefixed_by_underscore() {
+        // Catches is_ident_char not treating '_' as an identifier char.
+        let names = vitest_test_names("my_test('should not be picked up', () => {});");
+        assert!(names.is_empty());
     }
 }
