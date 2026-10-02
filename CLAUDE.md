@@ -41,14 +41,14 @@ home-rss/
 ├── fetcher/          # フィード収集 (http trigger、POST /fetch)
 ├── cleaner/          # 古い記事削除 (http trigger、POST /clean)
 ├── shared/           # 共有ライブラリ (DB モデル、型定義、取得+保存、SSRF ガード)
-├── repo-checks/      # リポ自体の検査（docs の引用など）。どのサービスも依存しない
+├── repo-checks/      # リポ自体の検査（docs の引用、テストの通らない変更行の検出など）。どのサービスも依存しない
 ├── migrations/       # SQL マイグレーション
 ├── docs/             # network-access.md: CNP と外部アクセス / spec.md: アプリが今どう動くかと守るべき性質
-├── scripts/          # test.sh: 全部のテスト
+├── scripts/          # test.sh: 全部のテスト / diff-coverage.sh: テストの通らない変更行
 ├── Cargo.toml        # workspace
 └── .github/workflows/
     ├── ci.yml        # detect changes → leaf ジョブ → CI Gate
-    ├── _build-rust.yml / _build-ui.yml / _test.yml   # leaf（reusable）
+    ├── _build-rust.yml / _build-ui.yml / _test.yml / _e2e.yml / _diff-coverage.yml   # leaf（reusable）
     └── release.yml   # イメージを GHCR push
 ```
 
@@ -125,6 +125,22 @@ Rust と UI の検査（整形・lint・型）、単体テスト、e2e を順に
 
 整形で落ちたら `cargo fmt --all`（e2e は `cargo fmt --manifest-path e2e/Cargo.toml`）と
 `cd ui && pnpm run fmt` で直す。clippy と oxlint は警告も失敗にする。
+
+### テストの通らない変更行
+
+```bash
+scripts/diff-coverage.sh origin/main
+```
+
+Rust の単体テスト（ホストターゲット）と UI のテストをカバレッジ付きで回し、base 以降に足した・
+変えた行のうちどのテストも通らない行を 1 行 1 件で出す。`untested` は単体テストで通せるのに
+通っていない行、`e2e-only` は Spin の中でしか動かない関数の行。テストのコードは出さない。
+PR では CI が同じものを annotation とジョブの summary に出す（行が出ても CI は落とさない）。
+
+`e2e-only` の判定は静的で、実行時に Spin からしか手に入らない値（pg の `Connection`、受け取った
+`Request` / `Response`）や Spin にしか答えられない呼び出し（`variables::get`、outbound HTTP、`time::sleep`）を
+使う関数と、それを呼ぶ関数を名前でたどったもの。単体テストで通したい処理は、こうした値を
+引数に取らない関数に切り出す。
 
 ### UI のテスト
 
