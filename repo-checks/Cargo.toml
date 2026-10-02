@@ -3,3 +3,7 @@ name = "home-rss-repo-checks"
 version = "0.1.0"
 edition = "2024"
 publish = false
+
+[dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", features = ["full", "visit"] }

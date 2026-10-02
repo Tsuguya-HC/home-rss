@@ -57,6 +57,7 @@ jobs:
       checks: ${{ steps.filter.outputs.checks }}
       e2e: ${{ steps.filter.outputs.e2e }}
       ui: ${{ steps.filter.outputs.ui }}
+      coverage: ${{ steps.filter.outputs.coverage }}
       workflows: ${{ steps.filter.outputs.workflows }}
       renovate: ${{ steps.filter.outputs.renovate }}
     steps:
@@ -100,6 +101,12 @@ jobs:
             ui:
               - 'ui/**'
               - '.github/workflows/_build-ui.yml'
+            # The report itself; a change to the code it measures is caught by
+            # rust / checks / ui.
+            coverage:
+              - 'repo-checks/**'
+              - 'scripts/diff-coverage.sh'
+              - '.github/workflows/_diff-coverage.yml'
             workflows:
               - '.github/workflows/**'
               - '.github/zizmor.yml'
@@ -142,6 +149,20 @@ jobs:
     permissions:
       contents: read
 
+  # Only pull requests have a base to compare with; in the merge queue the
+  # same commit was already reported on its pull request.
+  diff-coverage:
+    needs: detect
+    if: >-
+      ${{ github.event_name == 'pull_request' && (
+        needs.detect.outputs.rust == 'true' ||
+        needs.detect.outputs.checks == 'true' ||
+        needs.detect.outputs.ui == 'true' ||
+        needs.detect.outputs.coverage == 'true') }}
+    uses: ./.github/workflows/_diff-coverage.yml # zizmor: ignore[self-repository]
+    permissions:
+      contents: read
+
   # Checks the workflow expressions and job graph, and shells out to shellcheck
   # for every `run:` block.
   # ワークフローの lint は 6 リポジトリ共通なので home-actions に寄せてある。
@@ -171,7 +192,7 @@ jobs:
   # 緑」が必須チェックを満たしてしまう。
   gate:
     name: CI Gate
-    needs: [detect, build-rust, test, e2e, build-ui, lint-workflows, lint-renovate]
+    needs: [detect, build-rust, test, e2e, build-ui, diff-coverage, lint-workflows, lint-renovate]
     # `always()` ではなく `!cancelled()`。always() だと run をキャンセルしたとき
     # 全ての leaf が `cancelled` を返し、下の case をすり抜けて必須チェックが
     # 失敗として記録される。キャンセルされた run に下すべき判定は無い。

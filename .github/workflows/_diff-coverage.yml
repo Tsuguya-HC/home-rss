@@ -1,0 +1,112 @@
+name: diff coverage
+
+# Changed lines that no test runs, shown on the pull request as annotations and
+# in the job summary. Lines found do not fail the job: whether to enforce them
+# is decided once the output has been seen on a few pull requests (#217). An
+# error of the tool itself does fail it, so a broken report is not mistaken for
+# an empty one.
+on:
+  workflow_call:
+
+permissions: {}
+
+env:
+  # The release has no checksum file, so the tarball's hash is pinned here and
+  # has to be updated by hand together with the version.
+  # renovate: datasource=github-releases depName=taiki-e/cargo-llvm-cov
+  CARGO_LLVM_COV_VERSION: "0.9.1"
+  CARGO_LLVM_COV_SHA256: "b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a"
+
+jobs:
+  diff-coverage:
+    name: diff coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The base commit has to be present for `git diff <base>`.
+          fetch-depth: 0
+
+      # rustup directly: dtolnay/rust-toolchain force-pushes the branches it pins
+      # by, so a SHA pin points at an orphaned commit.
+      - name: Install Rust toolchain
+        env:
+          # renovate: datasource=github-releases depName=rust-lang/rust
+          RUST_VERSION: "1.98.1"
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update --component llvm-tools
+          rustup default "$RUST_VERSION"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-llvm-cov
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/cargo-llvm-cov.tar.gz" \
+            "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${CARGO_LLVM_COV_VERSION}/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${CARGO_LLVM_COV_SHA256}  $RUNNER_TEMP/cargo-llvm-cov.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/cargo-llvm-cov.tar.gz" -C "$HOME/.cargo/bin" cargo-llvm-cov
+
+      # No `version:`: the action reads ui/package.json's packageManager field.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: ui/package.json
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      # Runs on the pull request's merge commit, whose first parent is the base
+      # it was merged onto. The event's base.sha can be older than that when
+      # main moved before the merge commit was made.
+      - name: Report changed lines no test runs
+        run: |
+          set -euo pipefail
+          rc=0
+          scripts/diff-coverage.sh "$(git rev-parse HEAD^1)" > "$RUNNER_TEMP/findings" || rc=$?
+          case "$rc" in
+            0 | 1) ;;
+            *)
+              echo "::error::scripts/diff-coverage.sh failed (exit $rc); the report is not complete"
+              exit "$rc"
+              ;;
+          esac
+          count() { awk -F'\t' -v k="$1" '$2 == k' "$RUNNER_TEMP/findings" | wc -l; }
+          {
+            echo "## Changed lines no test runs"
+            if [ "$rc" -eq 0 ]; then
+              echo "None."
+            else
+              echo "untested: $(count untested), e2e-only: $(count e2e-only), no-coverage-data: $(count no-coverage-data)"
+              echo
+              # GitHub shows at most 10 annotations of each level per step, so
+              # this list is the complete one.
+              echo '```'
+              cat "$RUNNER_TEMP/findings"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Paths come from the pull request, so they are escaped before going
+          # into a workflow command's properties.
+          esc() {
+            local s=${1//%/%25}
+            s=${s//$'\r'/%0D}
+            s=${s//$'\n'/%0A}
+            s=${s//:/%3A}
+            printf '%s' "${s//,/%2C}"
+          }
+          while IFS=$'\t' read -r loc kind; do
+            level=warning
+            [ "$kind" = e2e-only ] && level=notice
+            if [ "$kind" = no-coverage-data ]; then
+              echo "::${level} file=$(esc "$loc")::${kind}"
+            else
+              echo "::${level} file=$(esc "${loc%:*}"),line=$(esc "${loc##*:}")::${kind}"
+            fi
+          done < "$RUNNER_TEMP/findings"
