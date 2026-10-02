@@ -195,10 +195,14 @@ fn record_use_tree_inner(tree: &syn::UseTree, prefix: &mut Vec<String>, map: &mu
             prefix.pop();
         }
         syn::UseTree::Name(n) => {
-            map.single.insert(n.ident.to_string(), prefix.join("::"));
+            let mut full = prefix.clone();
+            full.push(n.ident.to_string());
+            map.single.insert(n.ident.to_string(), full.join("::"));
         }
         syn::UseTree::Rename(r) => {
-            map.single.insert(r.rename.to_string(), prefix.join("::"));
+            let mut full = prefix.clone();
+            full.push(r.ident.to_string());
+            map.single.insert(r.rename.to_string(), full.join("::"));
         }
         syn::UseTree::Glob(_) => {
             map.glob.push(prefix.join("::"));
@@ -314,6 +318,29 @@ impl<'ast, 'a> syn::visit::Visit<'ast> for SpinCallVisitor<'a> {
         }
         syn::visit::visit_expr_call(self, node);
     }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        // Receiver types need type resolution, so only method names decide here;
+        // the pg import guard keeps non-Spin query/execute calls out. Spin's
+        // query/execute always take arguments, so an argument-less call is not one.
+        if !self.found {
+            let name = node.method.to_string();
+            if (name == "query" || name == "execute")
+                && !node.args.is_empty()
+                && pg_imported(self.imports)
+            {
+                self.found = true;
+            }
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn pg_imported(imports: &ImportMap) -> bool {
+    imports
+        .single
+        .values()
+        .any(|mapped| mapped == "spin_sdk::pg" || mapped.starts_with("spin_sdk::pg::"))
 }
 
 struct FnInfo {
@@ -428,8 +455,16 @@ fn collect_fn_items_in_block(block: &syn::Block, imports: &ImportMap, out: &mut 
 }
 
 pub fn classify_line(source: &str, line: u32) -> CoverageClass {
-    let line = line as usize;
     let infos = collect_fn_infos(source);
+    classify_with_infos(line, &infos)
+}
+
+fn is_ui_path(path: &str) -> bool {
+    path == "ui" || path.starts_with("ui/")
+}
+
+fn classify_with_infos(line: u32, infos: &[FnInfo]) -> CoverageClass {
+    let line = line as usize;
     let mut best: Option<&FnInfo> = None;
     for info in infos.iter() {
         if line >= info.start && line <= info.end {
@@ -452,16 +487,13 @@ pub fn classify_line(source: &str, line: u32) -> CoverageClass {
     }
 }
 
-fn is_ui_path(path: &str) -> bool {
-    path == "ui" || path.starts_with("ui/")
-}
-
 pub fn classify_report(
     changed: &[ChangedLine],
     uncovered: &[UncoveredLine],
     load: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<ClassifiedLine> {
     let mut out = Vec::new();
+    let mut cache: HashMap<String, Option<Vec<FnInfo>>> = HashMap::new();
     for change in changed {
         let matches = uncovered
             .iter()
@@ -472,8 +504,11 @@ pub fn classify_report(
         let class = if is_ui_path(&change.path) {
             CoverageClass::Untested
         } else {
-            match load(&change.path) {
-                Some(source) => classify_line(&source, change.line),
+            let infos = cache
+                .entry(change.path.clone())
+                .or_insert_with(|| load(&change.path).map(|source| collect_fn_infos(&source)));
+            match infos {
+                Some(infos) => classify_with_infos(change.line, infos),
                 None => CoverageClass::Untested,
             }
         };

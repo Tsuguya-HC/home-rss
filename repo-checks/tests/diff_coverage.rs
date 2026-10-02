@@ -158,7 +158,13 @@ fn marks_qualified_spin_request_param_e2e_only() {
 #[test]
 fn marks_imported_spin_request_param_e2e_only() {
     // Catches only matching the qualified path and ignoring `use` imports.
-    assert_eq!(classify_line(HTTP_SERVICE_FN, 6), CoverageClass::E2eOnly);
+    let source = concat!(
+        "use spin_sdk::http::{Method, Request, StatusCode};\n",
+        "async fn route(req: Request) -> anyhow::Result<()> {\n",
+        "    Ok(())\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 3), CoverageClass::E2eOnly);
 }
 
 #[test]
@@ -397,19 +403,183 @@ fn end_to_end_classifies_through_files() {
 #[test]
 fn binary_delegates_to_run_with_argv_paths() {
     // Catches the bin ignoring argv or printing something other than run's output.
-    let root = std::env::temp_dir().join(format!("diffcov-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "diffcov-bin-{}-{}",
+        std::process::id(),
+        "delegates"
+    ));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("empty.diff"), "").unwrap();
-    std::fs::write(root.join("empty.lcov"), "TN:\nend_of_record\n").unwrap();
+    // The diff only intersects the rust lcov, not the ui lcov: swapping the
+    // diff and rust-lcov argv entries must change the report.
+    let source = concat!("fn probe(a: i32) -> i32 {\n", "    a + 1\n", "}\n",);
+    std::fs::write(root.join("probe.rs"), source).unwrap();
+    std::fs::write(
+        root.join("test.diff"),
+        concat!(
+            "diff --git a/probe.rs b/probe.rs\n",
+            "index abc..def 100644\n",
+            "--- a/probe.rs\n",
+            "+++ b/probe.rs\n",
+            "@@ -1,3 +1,3 @@\n",
+            " fn probe(a: i32) -> i32 {\n",
+            "-    a\n",
+            "+    a + 1\n",
+            " }\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("rust.lcov"),
+        "TN:\nSF:probe.rs\nDA:1,5\nDA:2,0\nDA:3,5\nend_of_record\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("ui.lcov"), "TN:\nend_of_record\n").unwrap();
     let bin = env!("CARGO_BIN_EXE_diff-coverage");
     let output = std::process::Command::new(bin)
-        .arg(root.join("empty.diff"))
-        .arg(root.join("empty.lcov"))
-        .arg(root.join("empty.lcov"))
+        .arg(root.join("test.diff"))
+        .arg(root.join("rust.lcov"))
+        .arg(root.join("ui.lcov"))
+        .current_dir(&root)
         .output()
         .unwrap();
     std::fs::remove_dir_all(&root).ok();
     assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "probe.rs:2\tuntested\n"
+    );
+}
+
+#[test]
+fn marks_pg_method_calls_e2e_only() {
+    // Catches only matching Spin function calls and missing
+    // conn.query/conn.execute method calls through a spin_sdk::pg import.
+    let source = concat!(
+        "use spin_sdk::pg::Connection;\n",
+        "async fn store(conn: &Connection) -> anyhow::Result<()> {\n",
+        "    conn.execute(\"INSERT INTO t VALUES ($1)\", vec![]).await?;\n",
+        "    Ok(())\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 3), CoverageClass::E2eOnly);
+    let source = concat!(
+        "use spin_sdk::pg::Connection;\n",
+        "async fn load(conn: &Connection) -> anyhow::Result<()> {\n",
+        "    conn.query(\"SELECT 1\", vec![]).await?;\n",
+        "    Ok(())\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 3), CoverageClass::E2eOnly);
+}
+
+#[test]
+fn marks_bare_imported_send_call_e2e_only() {
+    // Catches resolving a bare `send` import to its module path instead of
+    // the full spin_sdk::http::send path.
+    let source = concat!(
+        "use spin_sdk::http::send;\n",
+        "async fn helper(req: spin_sdk::http::Request) -> anyhow::Result<()> {\n",
+        "    Ok(())\n",
+        "}\n",
+        "async fn isolated_call() -> anyhow::Result<()> {\n",
+        "    let req = make_req();\n",
+        "    let _resp = send(req).await?;\n",
+        "    Ok(())\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 8), CoverageClass::E2eOnly);
+}
+
+#[test]
+fn ignores_non_spin_query_method_calls() {
+    // Catches flagging any `.query` receiver as Spin without a spin_sdk::pg import.
+    let source = concat!(
+        "async fn load(conn: &tokio_postgres::Client) -> anyhow::Result<()> {\n",
+        "    conn.query(\"SELECT 1\", &[]).await?;\n",
+        "    Ok(())\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 2), CoverageClass::Untested);
+}
+
+#[test]
+fn marks_pg_method_calls_through_module_import_e2e_only() {
+    // Catches only recognizing item imports (`use spin_sdk::pg::Connection`)
+    // when deciding method-call receivers.
+    let source = concat!(
+        "use spin_sdk::pg;\n",
+        "async fn wipe(conn: &pg::Connection) -> anyhow::Result<()> {\n",
+        "    conn.execute(\"DELETE FROM t\", vec![]).await?;\n",
+        "    Ok(())\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 3), CoverageClass::E2eOnly);
+}
+
+#[test]
+fn ignores_non_query_methods_despite_pg_import() {
+    // Catches treating any method call as a Spin query once spin_sdk::pg is imported.
+    let source = concat!(
+        "use spin_sdk::pg::Connection;\n",
+        "async fn load(conn: &Connection) -> anyhow::Result<()> {\n",
+        "    let rows = conn.rows();\n",
+        "    Ok(())\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 3), CoverageClass::Untested);
+}
+
+#[test]
+fn marks_renamed_spin_request_param_e2e_only() {
+    // Catches dropping the leaf name when resolving renamed (`as`) imports.
+    let source = concat!(
+        "use spin_sdk::http::Request as Req;\n",
+        "async fn route(req: Req) -> anyhow::Result<()> {\n",
+        "    Ok(())\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 2), CoverageClass::E2eOnly);
+}
+
+#[test]
+fn ignores_argument_less_query_method_despite_pg_import() {
+    // Catches matching argument-less methods (e.g. Uri::query) as Spin queries.
+    let source = concat!(
+        "use spin_sdk::pg::Connection;\n",
+        "async fn route(uri: http::Uri, _conn: &Connection) -> Option<String> {\n",
+        "    uri.query().map(|s| s.to_string())\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 3), CoverageClass::Untested);
+}
+
+#[test]
+fn loads_each_source_once_per_report() {
+    // Catches re-reading and re-parsing the same file once per changed line.
+    use std::cell::Cell;
+    let mut src = String::new();
+    let n: u32 = 30;
+    for i in 0..n {
+        src.push_str(&format!("fn f{i}() {{\n    let _x = {i};\n}}\n"));
+    }
+    let changed: Vec<ChangedLine> = (0..n)
+        .map(|i| ChangedLine {
+            path: "big.rs".into(),
+            line: i * 3 + 2,
+        })
+        .collect();
+    let uncovered: Vec<UncoveredLine> = (0..n)
+        .map(|i| UncoveredLine {
+            path: "big.rs".into(),
+            line: i * 3 + 2,
+        })
+        .collect();
+    let loads = Cell::new(0u32);
+    let out = classify_report(&changed, &uncovered, &|_| {
+        loads.set(loads.get() + 1);
+        Some(src.clone())
+    });
+    assert_eq!(out.len(), n as usize);
+    assert_eq!(loads.get(), 1);
 }
