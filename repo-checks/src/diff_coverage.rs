@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ChangedLine {
@@ -304,6 +304,7 @@ fn call_is_spin_runtime(path: &syn::Path, imports: &ImportMap) -> bool {
 
 struct SpinCallVisitor<'a> {
     imports: &'a ImportMap,
+    non_connection_params: HashSet<String>,
     found: bool,
 }
 
@@ -319,15 +320,18 @@ impl<'ast, 'a> syn::visit::Visit<'ast> for SpinCallVisitor<'a> {
         syn::visit::visit_expr_call(self, node);
     }
 
+    fn visit_item_fn(&mut self, _node: &'ast syn::ItemFn) {}
+
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        // Receiver types need type resolution, so only method names decide here;
-        // the pg import guard keeps non-Spin query/execute calls out. Spin's
-        // query/execute always take arguments, so an argument-less call is not one.
+        // Receiver types need resolution, so declared parameter types decide.
+        // Spin's query/execute always take arguments, so an argument-less
+        // call is not one.
         if !self.found {
             let name = node.method.to_string();
             if (name == "query" || name == "execute")
                 && !node.args.is_empty()
                 && pg_imported(self.imports)
+                && !receiver_is_non_connection_param(&node.receiver, &self.non_connection_params)
             {
                 self.found = true;
             }
@@ -336,11 +340,54 @@ impl<'ast, 'a> syn::visit::Visit<'ast> for SpinCallVisitor<'a> {
     }
 }
 
+fn receiver_is_non_connection_param(
+    receiver: &syn::Expr,
+    non_connection: &HashSet<String>,
+) -> bool {
+    if let syn::Expr::Path(p) = receiver
+        && p.qself.is_none()
+        && p.path.segments.len() == 1
+    {
+        return non_connection.contains(&p.path.segments[0].ident.to_string());
+    }
+    false
+}
+
+fn type_is_spin_connection(ty: &syn::Type, imports: &ImportMap) -> bool {
+    match ty {
+        syn::Type::Path(p) => {
+            if p.qself.is_some() {
+                return false;
+            }
+            resolve_type_path(&p.path, imports).as_deref() == Some("spin_sdk::pg::Connection")
+        }
+        syn::Type::Reference(r) => type_is_spin_connection(&r.elem, imports),
+        _ => false,
+    }
+}
+
+fn collect_non_connection_params(func: &syn::ItemFn, imports: &ImportMap) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for arg in &func.sig.inputs {
+        if let syn::FnArg::Typed(t) = arg
+            && !type_is_spin_connection(&t.ty, imports)
+            && let syn::Pat::Ident(name) = t.pat.as_ref()
+        {
+            out.insert(name.ident.to_string());
+        }
+    }
+    out
+}
+
 fn pg_imported(imports: &ImportMap) -> bool {
     imports
         .single
         .values()
         .any(|mapped| mapped == "spin_sdk::pg" || mapped.starts_with("spin_sdk::pg::"))
+        || imports
+            .glob
+            .iter()
+            .any(|g| g == "spin_sdk" || g == "spin_sdk::pg")
 }
 
 struct FnInfo {
@@ -369,8 +416,10 @@ fn fn_is_e2e_only(func: &syn::ItemFn, imports: &ImportMap) -> bool {
     }) {
         return true;
     }
+    let non_connection_params = collect_non_connection_params(func, imports);
     let mut visitor = SpinCallVisitor {
         imports,
+        non_connection_params,
         found: false,
     };
     syn::visit::visit_block(&mut visitor, &func.block);

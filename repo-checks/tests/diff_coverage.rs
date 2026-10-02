@@ -555,6 +555,81 @@ fn ignores_argument_less_query_method_despite_pg_import() {
 }
 
 #[test]
+fn ignores_spin_calls_inside_nested_functions() {
+    // Catches the outer-function scan descending into a nested `fn` item
+    // and attributing the inner Spin call to the outer body.
+    let source = concat!(
+        "fn outer() -> i32 {\n",
+        "    let x = 1;\n",
+        "    fn inner() -> bool {\n",
+        "        spin_sdk::variables::get(\"x\").is_empty()\n",
+        "    }\n",
+        "    let _ = inner();\n",
+        "    x\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 2), CoverageClass::Untested);
+}
+
+#[test]
+fn marks_pg_method_calls_through_glob_import_e2e_only() {
+    // Catches the pg-import guard looking at single imports only while the
+    // other import consumers also consult glob imports.
+    let source = concat!(
+        "use spin_sdk::pg::*;\n",
+        "async fn store(conn: &Connection) {\n",
+        "    conn.execute(\"INSERT INTO t VALUES ($1)\", vec![]);\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 3), CoverageClass::E2eOnly);
+}
+
+#[test]
+fn marks_pg_method_calls_through_top_level_glob_e2e_only() {
+    // Catches the pg-import guard missing `use spin_sdk::*;` while the other
+    // import consumers also consult it.
+    let source = concat!(
+        "use spin_sdk::*;\n",
+        "async fn store(conn: &pg::Connection) {\n",
+        "    conn.execute(\"INSERT INTO t VALUES ($1)\", vec![]);\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 3), CoverageClass::E2eOnly);
+}
+
+#[test]
+fn marks_bare_attribute_functions_e2e_only() {
+    // Catches the attribute branch regressing while every other attribute
+    // fixture also carries a Request parameter that masks the regression.
+    let source = concat!(
+        "use spin_sdk::http_service;\n",
+        "\n",
+        "#[http_service]\n",
+        "async fn handle() -> &'static str {\n",
+        "    \"ok\"\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 5), CoverageClass::E2eOnly);
+}
+
+#[test]
+fn ignores_pg_method_calls_on_unrelated_receivers() {
+    // Catches flagging `query`/`execute` on any receiver once a spin_sdk::pg
+    // import is present in the file.
+    let source = concat!(
+        "use spin_sdk::pg::ParameterValue;\n",
+        "struct Cmd;\n",
+        "impl Cmd {\n",
+        "    fn execute(&self, _args: Vec<ParameterValue>) -> bool { true }\n",
+        "}\n",
+        "fn run(c: &Cmd) -> bool {\n",
+        "    c.execute(vec![])\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 7), CoverageClass::Untested);
+}
+
+#[test]
 fn loads_each_source_once_per_report() {
     // Catches re-reading and re-parsing the same file once per changed line.
     use std::cell::Cell;
