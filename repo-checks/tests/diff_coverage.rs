@@ -630,6 +630,49 @@ fn ignores_pg_method_calls_on_unrelated_receivers() {
 }
 
 #[test]
+fn keeps_qualified_receiver_path_from_matching_param_name() {
+    // Catches the qself guard on the exclusion regressing into matching a
+    // qualified path: `<Cmd>::conn` names no value, so the non-Connection
+    // param name `conn` must not exclude it.
+    let source = concat!(
+        "use spin_sdk::pg::ParameterValue;\n",
+        "fn run(conn: &Cmd) -> bool {\n",
+        "    <Cmd>::conn.execute(vec![])\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 3), CoverageClass::E2eOnly);
+}
+
+#[test]
+fn keeps_qualified_self_connection_type_from_resolving() {
+    // Catches the qself guard on the Connection type check regressing into
+    // resolving `<Foo>::spin_sdk::pg::Connection` as a Connection: `conn`
+    // is not a Connection param, so its `execute` call stays out of e2e-only.
+    let source = concat!(
+        "use spin_sdk::pg::ParameterValue;\n",
+        "struct Foo;\n",
+        "fn run(conn: <Foo>::spin_sdk::pg::Connection) -> bool {\n",
+        "    conn.execute(vec![])\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 4), CoverageClass::Untested);
+}
+
+#[test]
+fn keeps_multisegment_receiver_path_from_matching_param_prefix() {
+    // Catches the single-segment guard on the exclusion regressing into a
+    // bare-prefix match: `conn::SOMETHING` starts with the non-Connection
+    // param name `conn` but is not that param.
+    let source = concat!(
+        "use spin_sdk::pg::ParameterValue;\n",
+        "fn run(conn: &Cmd) -> bool {\n",
+        "    conn::SOMETHING.execute(vec![])\n",
+        "}\n",
+    );
+    assert_eq!(classify_line(source, 3), CoverageClass::E2eOnly);
+}
+
+#[test]
 fn loads_each_source_once_per_report() {
     // Catches re-reading and re-parsing the same file once per changed line.
     use std::cell::Cell;
