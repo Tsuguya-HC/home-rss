@@ -3,3 +3,11 @@ name = "home-rss-repo-checks"
 version = "0.1.0"
 edition = "2024"
 publish = false
+
+[dependencies]
+syn = { workspace = true }
+proc-macro2 = { workspace = true }
+
+[[bin]]
+name = "diff-coverage"
+path = "src/bin/diff-coverage.rs"
