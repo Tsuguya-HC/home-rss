@@ -10,7 +10,7 @@ GitHub Issue の要件を実装し、PR を作成する。制限時間は 1 時�
 - git user: claude-code[bot]
 - ツール: git, gh, cargo, rustc, spin
 - ターゲット: wasm32-wasip1（.cargo/config.toml でデフォルト設定済み）
-- プロジェクト詳細はリポジトリの CLAUDE.md を参照すること
+- プロジェクト詳細はリポジトリの AGENTS.md を参照すること
 
 ## 言語
 
