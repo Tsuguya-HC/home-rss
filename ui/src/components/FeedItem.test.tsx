@@ -13,15 +13,18 @@ const feed: Feed = {
   last_modified: null,
   last_fetched_at: null,
   created_at: null,
+  last_fetch_error: null,
+  fetch_failing_since: null,
 }
 
 function renderItem(
   onDelete = vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
   onSelect = vi.fn<() => void>(),
+  target: Feed = feed,
 ) {
   render(
     <FeedItem
-      feed={feed}
+      feed={target}
       unreadCount={0}
       isSelected={false}
       onSelect={onSelect}
@@ -58,5 +61,30 @@ describe('FeedItem', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('shows a warning for a failing feed with the reason and time in its title', () => {
+    // 失敗中のフィードだけ警告マーク (⚠)。削除確認の `!` とは別物。
+    const failing: Feed = {
+      ...feed,
+      last_fetch_error: 'HTTP 404',
+      fetch_failing_since: 1757894400,
+    }
+    renderItem(
+      vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+      vi.fn<() => void>(),
+      failing,
+    )
+
+    const mark = screen.getByText('⚠')
+    const title = mark.getAttribute('title') ?? ''
+    expect(title).toContain('HTTP 404')
+    expect(title).toContain(String(new Date(1757894400 * 1000).getFullYear()))
+  })
+
+  it('shows no warning for a feed without a fetch failure', () => {
+    renderItem()
+
+    expect(screen.queryByText('⚠')).toBeNull()
   })
 })

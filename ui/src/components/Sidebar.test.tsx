@@ -14,6 +14,8 @@ function makeFeed(id: string, title: string | null): Feed {
     last_modified: null,
     last_fetched_at: null,
     created_at: null,
+    last_fetch_error: null,
+    fetch_failing_since: null,
   }
 }
 

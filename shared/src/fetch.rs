@@ -4,7 +4,7 @@ use crate::ssrf::reject_internal_feed_url;
 use anyhow::{Context, Result};
 use spin_sdk::http::body::IncomingBodyExt;
 use spin_sdk::http::{EmptyBody, Request, Response, StatusCode, send};
-use spin_sdk::pg::{Connection, Decode, ParameterValue, Row};
+use spin_sdk::pg::{Connection, DbValue, Decode, ParameterValue};
 use std::time::Duration;
 
 /// POST /api/feeds の即時取得 (#106) と定期取得 (fetcher) で共有する
@@ -17,7 +17,8 @@ pub enum FetchAndStoreOutcome {
     /// 304 Not Modified。DB には触れていない。
     NotModified,
     /// 取得・保存に成功した。更新後の feed 行 (UPDATE ... RETURNING の結果) を返す。
-    Stored(Feed),
+    /// `Feed` を直接載せると `large_enum_variant` に当たる大きさになるので Box にする。
+    Stored(Box<Feed>),
     /// URL がスキーム/ポート/内部ホストのガードで弾かれた、到達不能・想定外
     /// ステータス・タイムアウトなど、取得自体の失敗。
     FetchFailed(anyhow::Error),
@@ -207,7 +208,7 @@ pub async fn fetch_and_store(
         )
         .await
         {
-            Ok(feed) => FetchAndStoreOutcome::Stored(feed),
+            Ok(feed) => FetchAndStoreOutcome::Stored(Box::new(feed)),
             Err(e) => FetchAndStoreOutcome::StoreFailed(e),
         },
     }
@@ -283,7 +284,8 @@ async fn store(
              last_fetched_at = NOW() WHERE id = $5 \
              RETURNING id::text, url, title, site_url, etag, last_modified, \
              EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
+             EXTRACT(EPOCH FROM created_at)::bigint, last_fetch_error, \
+             EXTRACT(EPOCH FROM fetch_failing_since)::bigint",
             vec![
                 parsed.title.clone().into(),
                 parsed.site_url.clone().into(),
@@ -307,11 +309,12 @@ async fn store(
 }
 
 /// `SELECT id::text, url, title, site_url, etag, last_modified, \
-///  EXTRACT(EPOCH FROM last_fetched_at)::bigint, EXTRACT(EPOCH FROM created_at)::bigint`
+///  EXTRACT(EPOCH FROM last_fetched_at)::bigint, EXTRACT(EPOCH FROM created_at)::bigint, \
+///  last_fetch_error, EXTRACT(EPOCH FROM fetch_failing_since)::bigint`
 /// の列順に対応する行デコード。取得+保存の共有処理とここ (server の一覧/追加系
 /// クエリ) の両方から使う (#106)。永続化に依存しない DTO である
 /// `shared::models` を汚さないよう、ここ (feed feature 配下) に置く (#106 R6)。
-pub fn decode_feed_row(row: &Row) -> Result<Feed> {
+pub fn decode_feed_row(row: &impl std::ops::Index<usize, Output = DbValue>) -> Result<Feed> {
     Ok(Feed {
         id: String::decode(&row[0])?,
         url: String::decode(&row[1])?,
@@ -321,6 +324,8 @@ pub fn decode_feed_row(row: &Row) -> Result<Feed> {
         last_modified: Option::<String>::decode(&row[5])?,
         last_fetched_at: Option::<i64>::decode(&row[6])?,
         created_at: Option::<i64>::decode(&row[7])?,
+        last_fetch_error: Option::<String>::decode(&row[8])?,
+        fetch_failing_since: Option::<i64>::decode(&row[9])?,
     })
 }
 

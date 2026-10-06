@@ -318,6 +318,82 @@ async fn readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged() {
 }
 
 #[tokio::test]
+async fn fetcher_records_a_guard_rejection_as_a_fetch_failure() {
+    // DB に直接入れた内部向け URL は fetcher の定期取得で URL ガードに弾かれ、
+    // 失敗として feeds に記録され、`GET /api/feeds` に出る。外部のフィードは取得しない。
+    // seed 行は `last_fetched_at` を入れて「取得済み」にする: NULL のままだと
+    // 一度も取得していないフィードとして記録されない (#245 の仕様)。
+    let db = fresh_db().await;
+    let id = seed_feed(&db, "https://localhost/fetch-failure-feed").await;
+    db.execute(
+        "UPDATE feeds SET last_fetched_at = now() WHERE id = $1::text::uuid",
+        &[&id],
+    )
+    .await
+    .expect("mark feed as fetched");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/fetch", env("E2E_FETCHER_URL")))
+        .send()
+        .await
+        .expect("POST /fetch");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let (status, body) = get_json("/api/feeds").await;
+    assert_eq!(status, 200);
+    let feeds = body.as_array().expect("array of feeds");
+    assert_eq!(feeds.len(), 1);
+    let reason = feeds[0]["last_fetch_error"]
+        .as_str()
+        .expect("a guard rejection must leave last_fetch_error");
+    assert!(
+        reason.contains("ガード"),
+        "guard rejection reason must mention the guard, got {reason:?}"
+    );
+    assert!(
+        feeds[0]["fetch_failing_since"].is_number(),
+        "fetch_failing_since must be set while failing"
+    );
+}
+
+#[tokio::test]
+async fn feed_list_exposes_the_fetch_failure_record() {
+    // DB に直接入れた失敗の列が `GET /api/feeds` に出る。時刻は他の `_at` と同じエポック秒。
+    // 列自体は #245 のマイグレーションで足すので、先に列の存在を確かめる。
+    // 無ければここで落ちる (要求のアサーション)。あれば値を入れて API に出ることを確かめる。
+    let db = fresh_db().await;
+    let id = seed_feed(&db, "https://a.example/feed").await;
+    let cols: i64 = db
+        .query_one(
+            "SELECT COUNT(*) FROM information_schema.columns \
+             WHERE table_name = 'feeds' \
+             AND column_name IN ('last_fetch_error', 'fetch_failing_since')",
+            &[],
+        )
+        .await
+        .expect("read information_schema")
+        .get(0);
+    assert_eq!(
+        cols, 2,
+        "migration must add last_fetch_error and fetch_failing_since to feeds"
+    );
+    db.execute(
+        "UPDATE feeds SET last_fetch_error = $1, fetch_failing_since = to_timestamp($2::text::float8) WHERE id = $3::text::uuid",
+        &[&"HTTP 404", &1_757_894_400_i64.to_string(), &id],
+    )
+    .await
+    .expect("seed failure record");
+
+    let (status, body) = get_json("/api/feeds").await;
+    assert_eq!(status, 200);
+    let feeds = body.as_array().expect("array of feeds");
+    assert_eq!(feeds.len(), 1);
+    assert_eq!(feeds[0]["id"], id.as_str());
+    assert_eq!(feeds[0]["last_fetch_error"], "HTTP 404");
+    assert_eq!(feeds[0]["fetch_failing_since"], 1_757_894_400);
+}
+
+#[tokio::test]
 async fn cleaner_deletes_only_read_articles_past_retention() {
     let db = fresh_db().await;
     let feed = seed_feed(&db, "https://a.example/feed").await;
