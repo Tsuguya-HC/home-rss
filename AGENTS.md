@@ -162,7 +162,7 @@ worktree を切って server/ui/fetcher/cleaner を並列セッションで開�
 
 - **home-cluster**: K8s マニフェスト (SpinApp, CronWorkflow, CNP, oauth2-proxy, OnePasswordItem)
 - **home-infra**: Talos 設定 (containerd-shim-spin 拡張は Talos イメージに組み込み済み)
-- **home-cloudflare**: DNS / Tunnel (rss.infra.tgy.io)
+- Cloudflare の設定（別の private リポジトリ）: DNS / Tunnel (rss.infra.tgy.io)
 
 ## Issue 管理
 
