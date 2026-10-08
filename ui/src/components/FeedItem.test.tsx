@@ -13,6 +13,8 @@ const feed: Feed = {
   last_modified: null,
   last_fetched_at: null,
   created_at: null,
+  last_fetch_error: null,
+  fetch_failing_since: null,
 }
 
 function renderItem(
@@ -32,6 +34,34 @@ function renderItem(
 }
 
 describe('FeedItem', () => {
+  it('shows a warning mark with the reason and failing-since time for a failing feed', () => {
+    // 失敗中のフィードだけ、削除確認の `!` とは別物と分かる警告マーク (⚠) を出す (#245)。
+    const failing: Feed = {
+      ...feed,
+      last_fetch_error: 'HTTP 404',
+      fetch_failing_since: 1_757_894_400,
+    }
+    render(
+      <FeedItem
+        feed={failing}
+        unreadCount={0}
+        isSelected={false}
+        onSelect={() => {}}
+        onDelete={async () => {}}
+      />,
+    )
+
+    const mark = screen.getByText('⚠')
+    expect(mark.getAttribute('title')).toContain('HTTP 404')
+    expect(mark.getAttribute('title')).toContain('2025')
+  })
+
+  it('shows no warning mark for a feed without a failure record', () => {
+    renderItem()
+
+    expect(screen.queryByText('⚠')).toBeNull()
+  })
+
   it('deletes only on the second click', async () => {
     const user = userEvent.setup()
     const { onDelete, onSelect } = renderItem()

@@ -98,6 +98,16 @@ async fn delete(path: &str) -> u16 {
         .as_u16()
 }
 
+async fn post_fetch() -> u16 {
+    reqwest::Client::new()
+        .post(format!("{}/fetch", env("E2E_FETCHER_URL")))
+        .send()
+        .await
+        .expect("POST /fetch")
+        .status()
+        .as_u16()
+}
+
 fn titles(articles: &Value) -> Vec<&str> {
     let mut titles: Vec<&str> = articles
         .as_array()
@@ -338,4 +348,65 @@ async fn cleaner_deletes_only_read_articles_past_retention() {
 
     let (_, left) = get_json("/api/articles").await;
     assert_eq!(titles(&left), ["old-unread", "recent-read"]);
+}
+
+#[tokio::test]
+async fn scheduled_fetch_records_guard_rejection_as_failure() {
+    // DB に直接入れた内部向け URL は fetcher の定期取得で URL ガードに弾かれ、
+    // 失敗として feeds 行に記録されなければならない (#245)。外部のフィードは
+    // 取得しない。`https://localhost/feed` は DNS にも触れずガードで拒否される。
+    let db = fresh_db().await;
+    let id = seed_feed(&db, "https://localhost/feed").await;
+    db.execute(
+        "UPDATE feeds SET last_fetched_at = now() - make_interval(days => 1) \
+         WHERE id = $1::text::uuid",
+        &[&id],
+    )
+    .await
+    .expect("mark feed as previously fetched");
+
+    assert_eq!(post_fetch().await, 200);
+
+    let row = db
+        .query_one(
+            "SELECT last_fetch_error, fetch_failing_since IS NOT NULL AS failing \
+             FROM feeds WHERE id = $1::text::uuid",
+            &[&id],
+        )
+        .await
+        .expect("read failure record");
+    let error: Option<String> = row.get(0);
+    let failing: bool = row.get(1);
+    // ガードでの拒否と分かる理由が 200 文字以内で残り、連続失敗の始まりが立つ。
+    let error = error.expect("guard rejection must be recorded");
+    assert!(error.contains("ガード"), "unexpected reason: {error}");
+    assert!(error.chars().count() <= 200, "unexpected reason: {error}");
+    assert!(failing, "fetch_failing_since must be set");
+}
+
+#[tokio::test]
+async fn feed_list_exposes_failure_columns() {
+    // DB に直接入れた失敗の列が GET /api/feeds に出る (#245)。時刻は他の _at と
+    // 同じエポック秒。
+    let db = fresh_db().await;
+    let id = seed_feed(&db, "https://a.example/feed").await;
+    db.execute(
+        "UPDATE feeds SET last_fetch_error = $1, fetch_failing_since = now() \
+         WHERE id = $2::text::uuid",
+        &[&"HTTP 404", &id],
+    )
+    .await
+    .expect("seed failure record");
+
+    let (status, body) = get_json("/api/feeds").await;
+    assert_eq!(status, 200);
+    let feeds = body.as_array().expect("array of feeds");
+    assert_eq!(feeds.len(), 1);
+    assert_eq!(feeds[0]["id"], id.as_str());
+    assert_eq!(feeds[0]["last_fetch_error"], "HTTP 404");
+    assert!(
+        feeds[0]["fetch_failing_since"].as_i64().is_some(),
+        "fetch_failing_since must be epoch seconds, got {}",
+        feeds[0]
+    );
 }

@@ -60,8 +60,9 @@ enum ImmediateFetchOutcome {
     /// 応答に含めるのは取得後の最新行（RETURNING の結果）。ただし
     /// FetchAndStoreOutcome::NotModified（追加直後は etag が無いため実際には
     /// 起こらないはずの防御的な分岐、#106 R10）の場合だけ、取得前の行が
-    /// そのまま使われる。
-    Fetched(Feed),
+    /// そのまま使われる。Box にするのは `Feed` の肥大化で
+    /// `large_enum_variant` に当たらないため (#245)。
+    Fetched(Box<Feed>),
     /// 到達不能など、記事を取得できなかった（ユーザーに失敗として伝える）
     FetchFailed,
     /// 本文がフィードとしてパース不能（ユーザーに失敗として伝える）
@@ -107,7 +108,9 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
 
 const FEED_SELECT: &str = "SELECT id::text, url, title, site_url, etag, last_modified, \
      EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-     EXTRACT(EPOCH FROM created_at)::bigint \
+     EXTRACT(EPOCH FROM created_at)::bigint, \
+     last_fetch_error, \
+     EXTRACT(EPOCH FROM fetch_failing_since)::bigint \
      FROM feeds";
 
 const ARTICLE_SELECT: &str = "SELECT a.id::text, a.feed_id::text, a.url, a.title, a.content, a.author, \
@@ -185,7 +188,9 @@ async fn add_feed(req: Request) -> Result<Resp> {
                          ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
                          RETURNING id::text, url, title, site_url, etag, last_modified, \
                          EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-                         EXTRACT(EPOCH FROM created_at)::bigint, (xmax::text = '0')",
+                         EXTRACT(EPOCH FROM created_at)::bigint, \
+                         last_fetch_error, \
+                         EXTRACT(EPOCH FROM fetch_failing_since)::bigint, (xmax::text = '0')",
                         vec![ParameterValue::Str(url_text.clone())],
                     )
                     .await?
@@ -195,7 +200,7 @@ async fn add_feed(req: Request) -> Result<Resp> {
                 let row = rows.first().ok_or_else(|| {
                     anyhow::anyhow!("INSERT INTO feeds RETURNING returned no rows for {url_text}")
                 })?;
-                let is_new = bool::decode(&row[8])?;
+                let is_new = bool::decode(&row[10])?;
                 let feed = row_to_feed(row)?;
                 let outcome = immediate_store(
                     &conn,
@@ -300,7 +305,7 @@ async fn immediate_store(
     last_modified: Option<&str>,
 ) -> ImmediateFetchOutcome {
     match store_fetched(conn, &feed.id, parsed, etag, last_modified).await {
-        Ok(updated) => ImmediateFetchOutcome::Fetched(updated),
+        Ok(updated) => ImmediateFetchOutcome::Fetched(Box::new(updated)),
         Err(e) => {
             eprintln!("immediate_fetch {}: {e:#}", feed.url);
             ImmediateFetchOutcome::StoreFailed
@@ -583,13 +588,15 @@ mod tests {
             last_modified: None,
             last_fetched_at: None,
             created_at: None,
+            last_fetch_error: None,
+            fetch_failing_since: None,
         }
     }
 
     #[test]
     fn fetched_feed_returns_created() {
         use super::{ImmediateFetchOutcome, immediate_fetch_response};
-        let resp = immediate_fetch_response(&ImmediateFetchOutcome::Fetched(test_feed()));
+        let resp = immediate_fetch_response(&ImmediateFetchOutcome::Fetched(Box::new(test_feed())));
         assert_eq!(resp.status(), spin_sdk::http::StatusCode::CREATED);
     }
 
@@ -600,7 +607,7 @@ mod tests {
         updated.title = Some("Example Feed".to_owned());
         updated.site_url = Some("https://example.com/".to_owned());
         updated.last_fetched_at = Some(1_757_894_400);
-        let resp = immediate_fetch_response(&ImmediateFetchOutcome::Fetched(updated));
+        let resp = immediate_fetch_response(&ImmediateFetchOutcome::Fetched(Box::new(updated)));
         let body = resp
             .into_body()
             .into_inner()
@@ -648,7 +655,7 @@ mod tests {
         // されることを、bool の判定ではなく TxOutcome の組み立てで固定する
         // (#148 の差し戻し)。失敗パスの側は `only_failed_adds_of_new_feeds_roll_back`
         // と 2 本の失敗パス e2e が守る。
-        match decide_tx_outcome(true, ImmediateFetchOutcome::Fetched(test_feed())) {
+        match decide_tx_outcome(true, ImmediateFetchOutcome::Fetched(Box::new(test_feed()))) {
             TxOutcome::Commit(_) => {}
             TxOutcome::Rollback(_) => {
                 panic!("a successful add of a new feed must COMMIT, not ROLLBACK")
@@ -662,11 +669,11 @@ mod tests {
         // 成功は新規・既存どちらの行も残す。
         assert!(!should_rollback(
             true,
-            &ImmediateFetchOutcome::Fetched(test_feed())
+            &ImmediateFetchOutcome::Fetched(Box::new(test_feed()))
         ));
         assert!(!should_rollback(
             false,
-            &ImmediateFetchOutcome::Fetched(test_feed())
+            &ImmediateFetchOutcome::Fetched(Box::new(test_feed()))
         ));
         // 新規行の失敗は残骸になるので取り消す。既存行の失敗は前からある
         // 行なので残す（e2e の `readding_an_existing_feed_that_fails_to_fetch`

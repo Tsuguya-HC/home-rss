@@ -4,7 +4,7 @@ use crate::ssrf::reject_internal_feed_url;
 use anyhow::{Context, Result};
 use spin_sdk::http::body::IncomingBodyExt;
 use spin_sdk::http::{EmptyBody, Request, Response, StatusCode, send};
-use spin_sdk::pg::{Connection, Decode, ParameterValue, Row};
+use spin_sdk::pg::{Connection, DbValue, Decode, ParameterValue};
 use std::time::Duration;
 
 /// POST /api/feeds の即時取得 (#106) と定期取得 (fetcher) で共有する
@@ -17,7 +17,8 @@ pub enum FetchAndStoreOutcome {
     /// 304 Not Modified。DB には触れていない。
     NotModified,
     /// 取得・保存に成功した。更新後の feed 行 (UPDATE ... RETURNING の結果) を返す。
-    Stored(Feed),
+    /// Box にするのは `Feed` の肥大化で `large_enum_variant` に当たらないため (#245)。
+    Stored(Box<Feed>),
     /// URL がスキーム/ポート/内部ホストのガードで弾かれた、到達不能・想定外
     /// ステータス・タイムアウトなど、取得自体の失敗。
     FetchFailed(anyhow::Error),
@@ -207,7 +208,7 @@ pub async fn fetch_and_store(
         )
         .await
         {
-            Ok(feed) => FetchAndStoreOutcome::Stored(feed),
+            Ok(feed) => FetchAndStoreOutcome::Stored(Box::new(feed)),
             Err(e) => FetchAndStoreOutcome::StoreFailed(e),
         },
     }
@@ -283,7 +284,9 @@ async fn store(
              last_fetched_at = NOW() WHERE id = $5 \
              RETURNING id::text, url, title, site_url, etag, last_modified, \
              EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
+             EXTRACT(EPOCH FROM created_at)::bigint, \
+             last_fetch_error, \
+             EXTRACT(EPOCH FROM fetch_failing_since)::bigint",
             vec![
                 parsed.title.clone().into(),
                 parsed.site_url.clone().into(),
@@ -307,11 +310,12 @@ async fn store(
 }
 
 /// `SELECT id::text, url, title, site_url, etag, last_modified, \
-///  EXTRACT(EPOCH FROM last_fetched_at)::bigint, EXTRACT(EPOCH FROM created_at)::bigint`
+///  EXTRACT(EPOCH FROM last_fetched_at)::bigint, EXTRACT(EPOCH FROM created_at)::bigint, \
+///  last_fetch_error, EXTRACT(EPOCH FROM fetch_failing_since)::bigint`
 /// の列順に対応する行デコード。取得+保存の共有処理とここ (server の一覧/追加系
 /// クエリ) の両方から使う (#106)。永続化に依存しない DTO である
 /// `shared::models` を汚さないよう、ここ (feed feature 配下) に置く (#106 R6)。
-pub fn decode_feed_row(row: &Row) -> Result<Feed> {
+pub fn decode_feed_row(row: &impl std::ops::Index<usize, Output = DbValue>) -> Result<Feed> {
     Ok(Feed {
         id: String::decode(&row[0])?,
         url: String::decode(&row[1])?,
@@ -321,6 +325,8 @@ pub fn decode_feed_row(row: &Row) -> Result<Feed> {
         last_modified: Option::<String>::decode(&row[5])?,
         last_fetched_at: Option::<i64>::decode(&row[6])?,
         created_at: Option::<i64>::decode(&row[7])?,
+        last_fetch_error: Option::<String>::decode(&row[8])?,
+        fetch_failing_since: Option::<i64>::decode(&row[9])?,
     })
 }
 
@@ -376,9 +382,12 @@ fn header_string(resp: &Response, name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StatusOutcome, await_with_optional_timeout, classify_status, with_timeout};
+    use super::{
+        StatusOutcome, await_with_optional_timeout, classify_status, decode_feed_row, with_timeout,
+    };
     use futures_util::FutureExt;
     use spin_sdk::http::StatusCode;
+    use spin_sdk::pg::DbValue;
 
     #[test]
     fn classifies_ok_not_modified_and_unexpected() {
@@ -412,5 +421,44 @@ mod tests {
         // 崩れると定期取得が常に FetchFailed になる。
         let result = await_with_optional_timeout(None, async { 42 }).now_or_never();
         assert_eq!(result, Some(Some(42)));
+    }
+
+    fn failure_row(error: Option<DbValue>, since: Option<DbValue>) -> Vec<DbValue> {
+        vec![
+            DbValue::Str("feed-id".to_owned()),
+            DbValue::Str("https://a.example/feed".to_owned()),
+            DbValue::DbNull,
+            DbValue::DbNull,
+            DbValue::DbNull,
+            DbValue::DbNull,
+            DbValue::DbNull,
+            DbValue::DbNull,
+            error.unwrap_or(DbValue::DbNull),
+            since.unwrap_or(DbValue::DbNull),
+        ]
+    }
+
+    #[test]
+    fn decodes_failure_columns_when_present() {
+        // 新列 2 本 (last_fetch_error / fetch_failing_since, #245) が
+        // Some として返る。列順・型の取り違え（位置デコードのズレ）は
+        // e2e `feed_list_exposes_failure_columns` でも見るが、ここでは
+        // 値の有無の写像だけを固定する。
+        let feed = decode_feed_row(&failure_row(
+            Some(DbValue::Str("HTTP 404".to_owned())),
+            Some(DbValue::Int64(1_700_000_000)),
+        ))
+        .expect("decode failure columns");
+        assert_eq!(feed.last_fetch_error.as_deref(), Some("HTTP 404"));
+        assert_eq!(feed.fetch_failing_since, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn decodes_failure_columns_as_none_when_null() {
+        // 失敗していない行（両列 NULL）は None になる (#245)。`store()` の
+        // RETURNING に新列を足した際、NULL の写像を落とす変異を捕まえる。
+        let feed = decode_feed_row(&failure_row(None, None)).expect("decode null columns");
+        assert_eq!(feed.last_fetch_error, None);
+        assert_eq!(feed.fetch_failing_since, None);
     }
 }

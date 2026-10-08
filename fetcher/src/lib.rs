@@ -1,10 +1,13 @@
 use anyhow::Result;
 use home_rss_shared::db;
 use home_rss_shared::fetch::{FetchAndStoreOutcome, fetch_and_store};
+
+mod failure;
+use crate::failure::{FailureAction, decide_failure_action};
 use home_rss_shared::http::{Resp, text};
 use spin_sdk::http::{Request, StatusCode};
 use spin_sdk::http_service;
-use spin_sdk::pg::{Connection, Decode};
+use spin_sdk::pg::{Connection, Decode, ParameterValue};
 
 #[http_service]
 async fn handle_fetch(_req: Request) -> Resp {
@@ -21,7 +24,7 @@ async fn fetch_all_feeds() -> Result<()> {
     let conn = db::connect().await?;
     let rows = conn
         .query(
-            "SELECT id::text, url, etag, last_modified FROM feeds",
+            "SELECT id::text, url, etag, last_modified, last_fetched_at IS NOT NULL FROM feeds",
             vec![],
         )
         .await?
@@ -33,9 +36,17 @@ async fn fetch_all_feeds() -> Result<()> {
         let url = String::decode(&row[1])?;
         let etag = Option::<String>::decode(&row[2])?;
         let last_modified = Option::<String>::decode(&row[3])?;
+        let ever_fetched = bool::decode(&row[4])?;
 
-        if let Err(e) =
-            process_feed(&conn, &id, &url, etag.as_deref(), last_modified.as_deref()).await
+        if let Err(e) = process_feed(
+            &conn,
+            &id,
+            &url,
+            etag.as_deref(),
+            last_modified.as_deref(),
+            ever_fetched,
+        )
+        .await
         {
             eprintln!("Failed to process feed {url}: {e:#}");
         }
@@ -46,15 +57,44 @@ async fn fetch_all_feeds() -> Result<()> {
 
 /// POST /api/feeds の即時取得と定期取得で共有する「取得して保存する」処理は
 /// home_rss_shared::fetch::fetch_and_store に置く (#106)。timeout に None を渡し、
-/// 既存の定期取得の振る舞い（打ち切りなし）をそのまま保つ。
+/// 既存の定期取得の振る舞い（打ち切りなし）をそのまま保つ。取得結果に応じた
+/// 失敗記録 (`last_fetch_error` / `fetch_failing_since`) の書き換えは、共通の
+/// `store()` には足さず (#245)、ここで独立の `UPDATE feeds` として書く
+/// （即時取得も `store()` を通るため）。304 を含む成功は記録だけを消し、
+/// `last_fetched_at` には触れない。
 async fn process_feed(
     conn: &Connection,
     feed_id: &str,
     url: &str,
     etag: Option<&str>,
     last_modified: Option<&str>,
+    ever_fetched: bool,
 ) -> Result<()> {
-    match fetch_and_store(conn, feed_id, url, etag, last_modified, None).await {
+    let outcome = fetch_and_store(conn, feed_id, url, etag, last_modified, None).await;
+    match decide_failure_action(&outcome, ever_fetched) {
+        FailureAction::Record { reason } => {
+            conn.execute(
+                "UPDATE feeds SET last_fetch_error = $1, \
+                 fetch_failing_since = COALESCE(fetch_failing_since, NOW()) \
+                 WHERE id = $2 AND last_fetched_at IS NOT NULL",
+                vec![
+                    ParameterValue::Str(reason),
+                    ParameterValue::Uuid(feed_id.to_owned()),
+                ],
+            )
+            .await?;
+        }
+        FailureAction::Clear => {
+            conn.execute(
+                "UPDATE feeds SET last_fetch_error = NULL, fetch_failing_since = NULL \
+                 WHERE id = $1",
+                vec![ParameterValue::Uuid(feed_id.to_owned())],
+            )
+            .await?;
+        }
+        FailureAction::Keep => {}
+    }
+    match outcome {
         FetchAndStoreOutcome::NotModified | FetchAndStoreOutcome::Stored(_) => Ok(()),
         FetchAndStoreOutcome::FetchFailed(e)
         | FetchAndStoreOutcome::Unparseable(e)
