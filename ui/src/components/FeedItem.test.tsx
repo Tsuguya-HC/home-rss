@@ -13,6 +13,8 @@ const feed: Feed = {
   last_modified: null,
   last_fetched_at: null,
   created_at: null,
+  last_fetch_error: null,
+  fetch_failing_since: null,
 }
 
 function renderItem(
@@ -58,5 +60,49 @@ describe('FeedItem', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('shows a failure warning with reason and start time', () => {
+    // Catches a failing feed looking like a merely stale one: the warning
+    // mark must carry the record's reason and when it started failing (#245).
+    const failing = {
+      ...feed,
+      last_fetch_error: 'HTTP 404',
+      fetch_failing_since: 1757894400,
+    } as unknown as Feed
+    render(
+      <FeedItem
+        feed={failing}
+        unreadCount={0}
+        isSelected={false}
+        onSelect={() => {}}
+        onDelete={async () => {}}
+      />,
+    )
+    const mark = screen.getByTitle(/HTTP 404/)
+    expect(mark.textContent).toContain('⚠')
+    expect(mark.getAttribute('title')).toContain(String(new Date(1757894400 * 1000).getFullYear()))
+  })
+
+  it('shows no failure warning for a healthy feed', () => {
+    renderItem()
+    expect(screen.queryByText('⚠')).toBeNull()
+  })
+
+  it('shows unknown start time when the record has no timestamp', () => {
+    // Catches the warning title breaking on a record without
+    // fetch_failing_since: the reason must still show with a fallback (#245).
+    render(
+      <FeedItem
+        feed={{ ...feed, last_fetch_error: 'HTTP 500', fetch_failing_since: null }}
+        unreadCount={0}
+        isSelected={false}
+        onSelect={() => {}}
+        onDelete={async () => {}}
+      />,
+    )
+    const mark = screen.getByTitle(/HTTP 500/)
+    expect(mark.textContent).toContain('⚠')
+    expect(mark.getAttribute('title')).toContain('日時不明')
   })
 })

@@ -1,10 +1,11 @@
 use crate::feed::{ParsedFeed, parse_feed_bytes};
+use crate::fetch_failure::{FetchFailureAction, FetchOutcomeKind, decide_fetch_failure_action};
 use crate::models::Feed;
 use crate::ssrf::reject_internal_feed_url;
 use anyhow::{Context, Result};
 use spin_sdk::http::body::IncomingBodyExt;
 use spin_sdk::http::{EmptyBody, Request, Response, StatusCode, send};
-use spin_sdk::pg::{Connection, Decode, ParameterValue, Row};
+use spin_sdk::pg::{Connection, DbValue, Decode, ParameterValue};
 use std::time::Duration;
 
 /// POST /api/feeds の即時取得 (#106) と定期取得 (fetcher) で共有する
@@ -17,7 +18,9 @@ pub enum FetchAndStoreOutcome {
     /// 304 Not Modified。DB には触れていない。
     NotModified,
     /// 取得・保存に成功した。更新後の feed 行 (UPDATE ... RETURNING の結果) を返す。
-    Stored(Feed),
+    /// `Feed` が variant 間で突出して大きいため Box に入れる（clippy の
+    /// `large_enum_variant`。#245 で 2 列足して閾値を超えた）。
+    Stored(Box<Feed>),
     /// URL がスキーム/ポート/内部ホストのガードで弾かれた、到達不能・想定外
     /// ステータス・タイムアウトなど、取得自体の失敗。
     FetchFailed(anyhow::Error),
@@ -207,7 +210,7 @@ pub async fn fetch_and_store(
         )
         .await
         {
-            Ok(feed) => FetchAndStoreOutcome::Stored(feed),
+            Ok(feed) => FetchAndStoreOutcome::Stored(Box::new(feed)),
             Err(e) => FetchAndStoreOutcome::StoreFailed(e),
         },
     }
@@ -283,7 +286,8 @@ async fn store(
              last_fetched_at = NOW() WHERE id = $5 \
              RETURNING id::text, url, title, site_url, etag, last_modified, \
              EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
+             EXTRACT(EPOCH FROM created_at)::bigint, last_fetch_error, \
+             EXTRACT(EPOCH FROM fetch_failing_since)::bigint",
             vec![
                 parsed.title.clone().into(),
                 parsed.site_url.clone().into(),
@@ -307,11 +311,15 @@ async fn store(
 }
 
 /// `SELECT id::text, url, title, site_url, etag, last_modified, \
-///  EXTRACT(EPOCH FROM last_fetched_at)::bigint, EXTRACT(EPOCH FROM created_at)::bigint`
+///  EXTRACT(EPOCH FROM last_fetched_at)::bigint, EXTRACT(EPOCH FROM created_at)::bigint, \
+///  last_fetch_error, EXTRACT(EPOCH FROM fetch_failing_since)::bigint`
 /// の列順に対応する行デコード。取得+保存の共有処理とここ (server の一覧/追加系
 /// クエリ) の両方から使う (#106)。永続化に依存しない DTO である
 /// `shared::models` を汚さないよう、ここ (feed feature 配下) に置く (#106 R6)。
-pub fn decode_feed_row(row: &Row) -> Result<Feed> {
+pub fn decode_feed_row<R>(row: &R) -> Result<Feed>
+where
+    R: std::ops::Index<usize, Output = DbValue>,
+{
     Ok(Feed {
         id: String::decode(&row[0])?,
         url: String::decode(&row[1])?,
@@ -321,7 +329,41 @@ pub fn decode_feed_row(row: &Row) -> Result<Feed> {
         last_modified: Option::<String>::decode(&row[5])?,
         last_fetched_at: Option::<i64>::decode(&row[6])?,
         created_at: Option::<i64>::decode(&row[7])?,
+        last_fetch_error: Option::<String>::decode(&row[8])?,
+        fetch_failing_since: Option::<i64>::decode(&row[9])?,
     })
+}
+
+/// fetcher が `FetchAndStoreOutcome` を失敗記録の振り分けに渡すための写像。
+/// 種類と 200 文字切り詰め（マルチバイトは文字数基準）の契約は
+/// `shared/tests/fetch_failure_classification.rs` が固定する。
+pub fn fetch_failure_action(
+    outcome: &FetchAndStoreOutcome,
+    ever_fetched: bool,
+) -> FetchFailureAction {
+    match outcome {
+        FetchAndStoreOutcome::FetchFailed(e) => decide_fetch_failure_action(
+            FetchOutcomeKind::FetchFailed,
+            &format!("{e:#}"),
+            ever_fetched,
+        ),
+        FetchAndStoreOutcome::Unparseable(e) => decide_fetch_failure_action(
+            FetchOutcomeKind::Unparseable,
+            &format!("{e:#}"),
+            ever_fetched,
+        ),
+        FetchAndStoreOutcome::Stored(_) => {
+            decide_fetch_failure_action(FetchOutcomeKind::Stored, "", ever_fetched)
+        }
+        FetchAndStoreOutcome::NotModified => {
+            decide_fetch_failure_action(FetchOutcomeKind::NotModified, "", ever_fetched)
+        }
+        FetchAndStoreOutcome::StoreFailed(e) => decide_fetch_failure_action(
+            FetchOutcomeKind::StoreFailed,
+            &format!("{e:#}"),
+            ever_fetched,
+        ),
+    }
 }
 
 /// レスポンスステータスの分類。取得成功/未更新/失敗のいずれかに写す純粋関数。
@@ -376,7 +418,11 @@ fn header_string(resp: &Response, name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StatusOutcome, await_with_optional_timeout, classify_status, with_timeout};
+    use super::{
+        FetchAndStoreOutcome, StatusOutcome, await_with_optional_timeout, classify_status,
+        fetch_failure_action, with_timeout,
+    };
+    use crate::fetch_failure::FetchFailureAction;
     use futures_util::FutureExt;
     use spin_sdk::http::StatusCode;
 
@@ -412,5 +458,110 @@ mod tests {
         // 崩れると定期取得が常に FetchFailed になる。
         let result = await_with_optional_timeout(None, async { 42 }).now_or_never();
         assert_eq!(result, Some(Some(42)));
+    }
+
+    #[test]
+    fn decodes_the_failure_columns_in_column_order() {
+        // Catches a new column decoded from the wrong position: every
+        // column carries a distinct value, so a swapped index fails (#245).
+        use spin_sdk::pg::DbValue;
+        let row = vec![
+            DbValue::Str("id-1".to_owned()),
+            DbValue::Str("https://example.com/feed".to_owned()),
+            DbValue::Str("Example".to_owned()),
+            DbValue::Str("https://example.com/".to_owned()),
+            DbValue::Str("etag-1".to_owned()),
+            DbValue::Str("lm-1".to_owned()),
+            DbValue::Int64(1_757_894_400),
+            DbValue::Int64(1_757_890_000),
+            DbValue::Str("HTTP 404 fetching https://example.com/feed".to_owned()),
+            DbValue::Int64(1_757_894_000),
+        ];
+        let feed = super::decode_feed_row(&row).unwrap();
+        assert_eq!(feed.id, "id-1");
+        assert_eq!(feed.url, "https://example.com/feed");
+        assert_eq!(feed.title.as_deref(), Some("Example"));
+        assert_eq!(feed.site_url.as_deref(), Some("https://example.com/"));
+        assert_eq!(feed.etag.as_deref(), Some("etag-1"));
+        assert_eq!(feed.last_modified.as_deref(), Some("lm-1"));
+        assert_eq!(feed.last_fetched_at, Some(1_757_894_400));
+        assert_eq!(feed.created_at, Some(1_757_890_000));
+        assert_eq!(
+            feed.last_fetch_error.as_deref(),
+            Some("HTTP 404 fetching https://example.com/feed")
+        );
+        assert_eq!(feed.fetch_failing_since, Some(1_757_894_000));
+    }
+
+    #[test]
+    fn decodes_null_failure_columns_as_none() {
+        // A feed that never failed (or whose record was cleared) stores NULL
+        // in both columns; decoding must yield None, not an error (#245).
+        use spin_sdk::pg::DbValue;
+        let row = vec![
+            DbValue::Str("id-1".to_owned()),
+            DbValue::Str("https://example.com/feed".to_owned()),
+            DbValue::DbNull,
+            DbValue::DbNull,
+            DbValue::DbNull,
+            DbValue::DbNull,
+            DbValue::Int64(1_757_894_400),
+            DbValue::Int64(1_757_890_000),
+            DbValue::DbNull,
+            DbValue::DbNull,
+        ];
+        let feed = super::decode_feed_row(&row).unwrap();
+        assert_eq!(feed.last_fetch_error, None);
+        assert_eq!(feed.fetch_failing_since, None);
+    }
+
+    #[test]
+    fn outcome_maps_to_record_clear_and_keep() {
+        // Catches a FetchAndStoreOutcome variant wired to the wrong failure
+        // action: failed fetches must record, successes must clear, and
+        // store failures must leave the record alone (#245).
+        match fetch_failure_action(
+            &FetchAndStoreOutcome::FetchFailed(anyhow::anyhow!("HTTP 404")),
+            true,
+        ) {
+            FetchFailureAction::Record { reason } => assert!(reason.contains("404")),
+            other => panic!("FetchFailed must map to Record, got {other:?}"),
+        }
+        match fetch_failure_action(
+            &FetchAndStoreOutcome::Unparseable(anyhow::anyhow!("could not be parsed")),
+            true,
+        ) {
+            FetchFailureAction::Record { .. } => {}
+            other => panic!("Unparseable must map to Record, got {other:?}"),
+        }
+        assert_eq!(
+            fetch_failure_action(&FetchAndStoreOutcome::NotModified, true),
+            FetchFailureAction::Clear
+        );
+        assert_eq!(
+            fetch_failure_action(
+                &FetchAndStoreOutcome::Stored(Box::new(crate::models::Feed {
+                    id: String::new(),
+                    url: String::new(),
+                    title: None,
+                    site_url: None,
+                    etag: None,
+                    last_modified: None,
+                    last_fetched_at: None,
+                    created_at: None,
+                    last_fetch_error: None,
+                    fetch_failing_since: None,
+                })),
+                true
+            ),
+            FetchFailureAction::Clear
+        );
+        assert_eq!(
+            fetch_failure_action(
+                &FetchAndStoreOutcome::StoreFailed(anyhow::anyhow!("db is down")),
+                true
+            ),
+            FetchFailureAction::Keep
+        );
     }
 }

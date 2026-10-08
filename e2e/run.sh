@@ -32,10 +32,11 @@ command -v dbmate >/dev/null || { echo "dbmate is not on PATH" >&2; exit 1; }
 
 dbmate --url "${E2E_DATABASE_URL}" --migrations-dir migrations --no-dump-schema up
 
-cargo build --target wasm32-wasip1 --release -p home-rss-server -p home-rss-cleaner
+cargo build --target wasm32-wasip1 --release -p home-rss-server -p home-rss-cleaner -p home-rss-fetcher
 
 server_addr="127.0.0.1:${E2E_SERVER_PORT:-38080}"
 cleaner_addr="127.0.0.1:${E2E_CLEANER_PORT:-38081}"
+fetcher_addr="127.0.0.1:${E2E_FETCHER_PORT:-38082}"
 pids=()
 cleanup() {
   for pid in "${pids[@]}"; do kill "${pid}" 2>/dev/null || true; done
@@ -52,6 +53,7 @@ start() {
 }
 start server/spin.toml "${server_addr}"
 start cleaner/spin.toml "${cleaner_addr}" --variable retention_days=10
+start fetcher/spin.toml "${fetcher_addr}"
 
 # Probe an unrouted path: Spin answers 404 without running the component, so the
 # cleaner does not delete anything while we wait for it.
@@ -68,7 +70,8 @@ wait_listening() {
 }
 wait_listening "${server_addr}"
 wait_listening "${cleaner_addr}"
+wait_listening "${fetcher_addr}"
 
 host_target="$(rustc -vV | sed -n 's/^host: //p')"
-E2E_SERVER_URL="http://${server_addr}" E2E_CLEANER_URL="http://${cleaner_addr}" \
+E2E_SERVER_URL="http://${server_addr}" E2E_CLEANER_URL="http://${cleaner_addr}" E2E_FETCHER_URL="http://${fetcher_addr}" \
   cargo test --manifest-path e2e/Cargo.toml --target "${host_target}" -- --test-threads=1

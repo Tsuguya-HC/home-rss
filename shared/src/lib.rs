@@ -3,6 +3,7 @@ pub mod db;
 pub mod feed;
 #[cfg(feature = "feed")]
 pub mod fetch;
+pub mod fetch_failure;
 pub mod http;
 pub mod models;
 #[cfg(feature = "feed")]

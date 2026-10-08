@@ -1,10 +1,11 @@
 use anyhow::Result;
 use home_rss_shared::db;
-use home_rss_shared::fetch::{FetchAndStoreOutcome, fetch_and_store};
+use home_rss_shared::fetch::{FetchAndStoreOutcome, fetch_and_store, fetch_failure_action};
+use home_rss_shared::fetch_failure::FetchFailureAction;
 use home_rss_shared::http::{Resp, text};
 use spin_sdk::http::{Request, StatusCode};
 use spin_sdk::http_service;
-use spin_sdk::pg::{Connection, Decode};
+use spin_sdk::pg::{Connection, Decode, ParameterValue};
 
 #[http_service]
 async fn handle_fetch(_req: Request) -> Resp {
@@ -21,7 +22,7 @@ async fn fetch_all_feeds() -> Result<()> {
     let conn = db::connect().await?;
     let rows = conn
         .query(
-            "SELECT id::text, url, etag, last_modified FROM feeds",
+            "SELECT id::text, url, etag, last_modified, (last_fetched_at IS NOT NULL) FROM feeds",
             vec![],
         )
         .await?
@@ -33,9 +34,17 @@ async fn fetch_all_feeds() -> Result<()> {
         let url = String::decode(&row[1])?;
         let etag = Option::<String>::decode(&row[2])?;
         let last_modified = Option::<String>::decode(&row[3])?;
+        let ever_fetched = bool::decode(&row[4])?;
 
-        if let Err(e) =
-            process_feed(&conn, &id, &url, etag.as_deref(), last_modified.as_deref()).await
+        if let Err(e) = process_feed(
+            &conn,
+            &id,
+            &url,
+            etag.as_deref(),
+            last_modified.as_deref(),
+            ever_fetched,
+        )
+        .await
         {
             eprintln!("Failed to process feed {url}: {e:#}");
         }
@@ -53,11 +62,47 @@ async fn process_feed(
     url: &str,
     etag: Option<&str>,
     last_modified: Option<&str>,
+    ever_fetched: bool,
 ) -> Result<()> {
-    match fetch_and_store(conn, feed_id, url, etag, last_modified, None).await {
+    let outcome = fetch_and_store(conn, feed_id, url, etag, last_modified, None).await;
+    record_fetch_failure(conn, feed_id, &outcome, ever_fetched).await?;
+    match outcome {
         FetchAndStoreOutcome::NotModified | FetchAndStoreOutcome::Stored(_) => Ok(()),
         FetchAndStoreOutcome::FetchFailed(e)
         | FetchAndStoreOutcome::Unparseable(e)
         | FetchAndStoreOutcome::StoreFailed(e) => Err(e),
+    }
+}
+
+async fn record_fetch_failure(
+    conn: &Connection,
+    feed_id: &str,
+    outcome: &FetchAndStoreOutcome,
+    ever_fetched: bool,
+) -> Result<()> {
+    match fetch_failure_action(outcome, ever_fetched) {
+        FetchFailureAction::Keep => Ok(()),
+        FetchFailureAction::Clear => {
+            conn.execute(
+                "UPDATE feeds SET last_fetch_error = NULL, fetch_failing_since = NULL \
+                 WHERE id = $1",
+                vec![ParameterValue::Uuid(feed_id.to_owned())],
+            )
+            .await?;
+            Ok(())
+        }
+        FetchFailureAction::Record { reason } => {
+            conn.execute(
+                "UPDATE feeds SET last_fetch_error = $1, \
+                 fetch_failing_since = COALESCE(fetch_failing_since, NOW()) \
+                 WHERE id = $2",
+                vec![
+                    ParameterValue::Str(reason),
+                    ParameterValue::Uuid(feed_id.to_owned()),
+                ],
+            )
+            .await?;
+            Ok(())
+        }
     }
 }

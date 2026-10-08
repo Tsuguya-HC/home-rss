@@ -1,6 +1,6 @@
-//! End-to-end scenarios: the server and the cleaner run under `spin up` against a
-//! real PostgreSQL, and each test talks to them over HTTP while seeding and
-//! checking rows directly in the database. Run through `e2e/run.sh`.
+//! End-to-end scenarios: the server, the cleaner, and the fetcher run under
+//! `spin up` against a real PostgreSQL, and each test talks to them over HTTP
+//! while seeding and checking rows directly in the database. Run through `e2e/run.sh`.
 //!
 //! Every test starts from empty tables, so they must not run concurrently
 //! (`run.sh` passes `--test-threads=1`).
@@ -70,6 +70,20 @@ async fn count(db: &Client, sql: &str) -> i64 {
 
 fn server(path: &str) -> String {
     format!("{}{path}", env("E2E_SERVER_URL"))
+}
+
+fn fetcher(path: &str) -> String {
+    format!("{}{path}", env("E2E_FETCHER_URL"))
+}
+
+async fn post_fetcher(path: &str) -> u16 {
+    reqwest::Client::new()
+        .post(fetcher(path))
+        .send()
+        .await
+        .expect("POST fetcher")
+        .status()
+        .as_u16()
 }
 
 async fn get_json(path: &str) -> (u16, Value) {
@@ -305,7 +319,10 @@ async fn readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged() {
 
     assert_eq!(count(&db, "SELECT COUNT(*) FROM feeds").await, 1);
     let row = db
-        .query_one("SELECT id::text, url, title FROM feeds", &[])
+        .query_one(
+            "SELECT id::text, url, title, last_fetch_error, fetch_failing_since FROM feeds",
+            &[],
+        )
         .await
         .expect("read feed");
     let kept_id: String = row.get(0);
@@ -314,7 +331,92 @@ async fn readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged() {
     assert_eq!(kept_id, id);
     assert_eq!(kept_url, url);
     assert_eq!(kept_title.as_deref(), Some("Original Title"));
+    // The immediate fetch must neither write nor clear the scheduled-fetch
+    // failure record (#245).
+    let kept_error: Option<String> = row.get(3);
+    let kept_since: Option<std::time::SystemTime> = row.get(4);
+    assert_eq!(kept_error, None);
+    assert!(kept_since.is_none());
     assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 1);
+}
+
+#[tokio::test]
+async fn fetcher_records_a_guard_rejection_but_leaves_never_fetched_feeds_unmarked() {
+    // Catches the fetcher swallowing a per-feed failure without a trace: the
+    // internal URL never leaves the box, the SSRF guard rejects it, and the
+    // rejection must land in the failure columns (#245). The never-fetched
+    // row pins the OPML-imported exception in the same run.
+    let db = fresh_db().await;
+    let failing: String = db
+        .query_one(
+            "INSERT INTO feeds (url, last_fetched_at) VALUES ($1, now() - make_interval(days => 1)) RETURNING id::text",
+            &[&"https://localhost/feed"],
+        )
+        .await
+        .expect("insert ever-fetched feed")
+        .get(0);
+    let fresh: String = db
+        .query_one(
+            "INSERT INTO feeds (url) VALUES ($1) RETURNING id::text",
+            &[&"https://localhost/never-fetched"],
+        )
+        .await
+        .expect("insert never-fetched feed")
+        .get(0);
+
+    assert_eq!(post_fetcher("/fetch").await, 200);
+
+    let row = db
+        .query_one(
+            "SELECT last_fetch_error, EXTRACT(EPOCH FROM fetch_failing_since)::bigint FROM feeds WHERE id = $1::text::uuid",
+            &[&failing],
+        )
+        .await
+        .expect("read failure record");
+    let reason: Option<String> = row.get(0);
+    let since: Option<i64> = row.get(1);
+    let reason = reason.expect("a guard rejection must be recorded");
+    assert!(!reason.is_empty());
+    assert!(reason.chars().count() <= 200);
+    let since = since.expect("a guard rejection must stamp when it started");
+    assert!(since > 0);
+
+    let row = db
+        .query_one(
+            "SELECT last_fetch_error, EXTRACT(EPOCH FROM fetch_failing_since)::bigint FROM feeds WHERE id = $1::text::uuid",
+            &[&fresh],
+        )
+        .await
+        .expect("read never-fetched record");
+    let reason: Option<String> = row.get(0);
+    let since: Option<i64> = row.get(1);
+    assert_eq!(reason, None);
+    assert_eq!(since, None);
+}
+
+#[tokio::test]
+async fn list_feeds_exposes_the_failure_columns() {
+    // Catches GET /api/feeds dropping the new columns: a failure recorded
+    // directly in the DB must show up in the feed JSON (#245).
+    let db = fresh_db().await;
+    let id = seed_feed(&db, "https://a.example/feed").await;
+    db.execute(
+        "UPDATE feeds SET last_fetch_error = $1, fetch_failing_since = now() - make_interval(days => 2) WHERE id = $2::text::uuid",
+        &[&"HTTP 404", &id],
+    )
+    .await
+    .expect("seed failure record");
+
+    let (status, body) = get_json("/api/feeds").await;
+    assert_eq!(status, 200);
+    let feeds = body.as_array().expect("array of feeds");
+    assert_eq!(feeds.len(), 1);
+    assert_eq!(feeds[0]["id"], id.as_str());
+    assert_eq!(feeds[0]["last_fetch_error"], "HTTP 404");
+    let since = feeds[0]["fetch_failing_since"]
+        .as_i64()
+        .expect("failing-since as epoch seconds");
+    assert!(since > 0);
 }
 
 #[tokio::test]

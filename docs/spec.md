@@ -32,20 +32,22 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 | `POST /api/articles/read-all` | | R（全フィード） | W: 未読の全記事ぶん |
 | `POST /api/import/opml` | W: `INSERT … ON CONFLICT (url) DO NOTHING`。取得はしない | | |
 | `GET /api/stats` | R（件数） | R | R |
-| fetcher（`/fetch`） | R（`id, url, etag, last_modified` の全行）→ フィードごとに W | W | |
+| fetcher（`/fetch`） | R（`id, url, etag, last_modified` の全行）→ フィードごとに W（200 / 304 の保存と失敗の記録） | W | |
 | cleaner（`/clean`） | | D（既読かつ古いもの） | 連鎖で D |
 
 即時取得と fetcher の取得は同じ `shared/src/fetch.rs` の `fetch_only()` が行い、保存は同じ `store()` を `store_fetched()` / `fetch_and_store()` 経由で呼ぶ。
 
-- 取得前に `reject_internal_feed_url()` を毎回通す。弾かれたら何も書かない
-- 条件付き GET（`If-None-Match` / `If-Modified-Since`）。**200 のときだけ**書く。304 と失敗では DB に触れない
+- 取得前に `reject_internal_feed_url()` を毎回通す。弾かれたら記事・`feeds` の取得由来の列には何も書かず、失敗の記録だけ書く
+- 条件付き GET（`If-None-Match` / `If-Modified-Since`）。**200 のときだけ**記事と取得由来の列を書く。304 は取得由来の列に触れず、失敗の記録だけ消す。取得の失敗は取得由来の列に触れず、失敗の記録だけ書く
+- 失敗の記録は fetcher の `process_feed` が `store()` とは別の `UPDATE feeds` で書く・消す。200 か 304 なら `last_fetch_error` と `fetch_failing_since` を NULL に戻す。取得の失敗（ガードでの拒否・送信や受信のエラー・200 / 304 以外の応答・パース不能）は `last_fetch_error` に理由（200 文字で切る）を書き、`fetch_failing_since` が NULL のときだけ `NOW()` で刻む（続いている間は上書きしない）。保存の失敗は記録を変えない。一度も取得していない行（`last_fetched_at` が NULL）は失敗しても印を付けない。即時取得（`POST /api/feeds`）の成否はこの記録を書きも消しもしない
 - 200 のとき、`articles` に全エントリを UNNEST の 1 文で `INSERT … ON CONFLICT DO NOTHING`。既存の記事は更新しない（タイトル・本文・`image_url` が後から変わっても反映されない）
 - 続けて `feeds` の `title` / `site_url` / `etag` / `last_modified` を今回の応答とフィードの値で**上書き**し（無ければ NULL）、`last_fetched_at = NOW()`。即時取得は `etag` / `last_modified` を渡さない（条件付き GET にしない）
 
 列ごとの書き手:
 
 - `feeds.url`: 追加と OPML インポートだけ。保存するのは `reject_internal_feed_url()` が返した正規化後の URL
-- `feeds` のそれ以外: 200 のときの `store()` だけ（即時取得は `store_fetched()` 経由、fetcher は `fetch_and_store()` 経由）
+- `feeds` のそれ以外（`title` / `site_url` / `etag` / `last_modified` / `last_fetched_at`）: 200 のときの `store()` だけ（即時取得は `store_fetched()` 経由、fetcher は `fetch_and_store()` 経由）
+- `feeds.last_fetch_error` / `feeds.fetch_failing_since`: fetcher の `process_feed` の独立した `UPDATE` だけ。取得結果を「記録する / 消す / 変えない」に振り分けるのは `shared/src/fetch_failure.rs` の `decide_fetch_failure_action` で、取得結果との対応付けは `shared/src/fetch.rs` の `fetch_failure_action` が担う。即時取得は書きも消しもしない
 - `articles`: `store()` の INSERT だけ（経路は同上）。UPDATE する経路は無い
 - `read_status`: 既読 API と全既読 API だけ
 
@@ -71,7 +73,8 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 
 - Spin の **http trigger**（route `/fetch`、メソッドは問わない）。1 リクエストで 1 回分の取得をする
 - 誰がいつ呼ぶか、前の回が終わる前に次を呼ぶかは**リポの外で決まる**
-- 1 回分の動き: `feeds` を 1 度だけ全件読み、1 件ずつ順に `fetch_and_store()`（タイムアウト無し）。1 件の失敗はログに出して次へ進み、応答は 200。DB 接続と最初の SELECT の失敗だけが 500
+- 1 回分の動き: `feeds` を 1 度だけ全件読み（`last_fetched_at IS NOT NULL` で一度も取得していない行を見分ける）、1 件ずつ順に `fetch_and_store()`（タイムアウト無し）したあと、結果に応じた失敗の記録の `UPDATE` を書く。1 件の失敗はログに出して次へ進み、応答は 200。DB 接続と最初の SELECT の失敗だけが 500
+- 失敗の記録の `UPDATE` もそのフィードの処理の一部なので、記録の書き込みに失敗したらそのフィードは 500 ではなくログに出して次へ進む（取得の失敗と同じ扱い）
 - 読んだ後に追加されたフィードは、その回には取得されない
 
 ### cleaner
@@ -85,7 +88,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 - `POST /api/feeds` の中で、追加（または既存）の 1 フィードだけを取得する。取得は `fetch_only()` でトランザクションの外、保存は `store_fetched()` で `shared::tx::in_transaction` の 1 トランザクションの中。取得中は行ロックを取らないので fetcher・DELETE・同時追加を待たせない
 - 送信と本文読み取りのそれぞれを 15 秒で打ち切る（WASI の outbound HTTP にタイムアウトが無いため）
 - 応答: 取得して保存できたら 201 と取得後の行、取得失敗 502、パース不能 422、保存失敗 500、JSON 不正と URL の拒否は 400（DB に触れない）
-- 取得・パースの失敗ではトランザクションを始めず、新規の行は残らない。保存（INSERT と記事・`feeds` の書き込み）の失敗では新規の行は ROLLBACK され、何も残らない。既存の行への再追加は保存の失敗でも COMMIT して残し、行を変えない
+- 取得・パースの失敗ではトランザクションを始めず、新規の行は残らない。保存（INSERT と記事・`feeds` の書き込み）の失敗では新規の行は ROLLBACK され、何も残らない。既存の行への再追加は保存の失敗でも COMMIT して残し、行を変えない。失敗の記録（`last_fetch_error` / `fetch_failing_since`）も書きも消しもしない — e2e: `readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged`
 
 ### トランザクション
 
@@ -98,7 +101,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 
 | 組み合わせ | 起きること |
 |---|---|
-| 同じフィードの fetcher と即時取得（または fetcher 2 つ） | 記事は UNIQUE(`feed_id`, `url`) と `ON CONFLICT DO NOTHING` で重複しない。`feeds` の `title` / `etag` などは後から UPDATE した方が残る |
+| 同じフィードの fetcher と即時取得（または fetcher 2 つ） | 記事は UNIQUE(`feed_id`, `url`) と `ON CONFLICT DO NOTHING` で重複しない。`feeds` の `title` / `etag` など取得由来の列は後から UPDATE した方が残る。失敗の記録は別の列への別の文なので、即時取得の保存と干渉しない |
 | 取得中にそのフィードを `DELETE` | 即時取得は取得中に行ロックを取らないので、取得中の DELETE は待たずに実行される。DELETE が INSERT より先なら INSERT が新規行を作り直して保存は成功し 201 を返す（残骸になる。再追加の取得は終わっているので取り直さない）。INSERT と保存の書き込みは 1 トランザクションで行ロックを保持するので、その間に来た DELETE は COMMIT/ROLLBACK まで待ってから実行されるだけ |
 | cleaner が消した記事がまだフィードに載っている | 次に 200 が返ると UNIQUE に当たらないので、**未読の新しい行として入り直す**（304 なら入らない） |
 | cleaner / フィード削除で消えた記事を UI で開く | 既読 API が外部キー違反で 500。UI は再読み込みまで消えた記事を表示し続け、開くたびに既読 API を呼ぶ |
@@ -130,7 +133,9 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 ### 取得と保存
 
 - 200 だけを取得成功とし、304 は変更無し、それ以外は失敗 — `shared/src/fetch.rs`: `classifies_ok_not_modified_and_unexpected`
-- 304 と失敗では DB に触れない（`last_fetched_at` も更新しない） — テスト無し
+- 304 は記事と取得由来の列（`last_fetched_at` を含む）に触れず、失敗の記録だけ消す。取得の失敗は取得由来の列に触れず、失敗の記録だけ書く — e2e: `fetcher_records_a_guard_rejection_but_leaves_never_fetched_feeds_unmarked`
+- 失敗の記録の振り分け（記録する / 消す / 変えない）は `shared/src/fetch_failure.rs` の `decide_fetch_failure_action` が決め、取得結果との対応付けは `shared/src/fetch.rs` の `fetch_failure_action` が担う — `shared/tests/fetch_failure_classification.rs`: `fetch_failed_with_prior_fetch_is_recorded`, `unparseable_with_prior_fetch_is_recorded`, `stored_clears_the_record`, `not_modified_clears_the_record`, `store_failed_keeps_the_record_untouched`, `failure_of_never_fetched_feed_leaves_no_mark`, `record_reason_is_cut_at_200_chars`; `shared/src/fetch.rs`: `outcome_maps_to_record_clear_and_keep`
+- 失敗中のフィードは `GET /api/feeds` が `last_fetch_error` とエポック秒の `fetch_failing_since` を返し、UI はサイドバーのフィード名の横に警告マーク（⚠、理由と失敗し始めた時刻を `title` に）を出す — e2e: `list_feeds_exposes_the_failure_columns`; `ui/src/components/FeedItem.test.tsx`: `shows a failure warning with reason and start time`, `shows no failure warning for a healthy feed`
 - 既存の記事は上書きしない。同じフィード・同じ URL の記事は 1 行だけ — テスト無し
 - 1 フィードの失敗で fetcher の他のフィードを止めない — テスト無し
 - パースできない本文はエラーにする — `shared/src/feed.rs`: `unparseable_body_is_an_error`
