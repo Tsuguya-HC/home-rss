@@ -25,6 +25,8 @@ pub struct Feed {
     pub last_modified: Option<String>,
     pub last_fetched_at: Option<i64>,
     pub created_at: Option<i64>,
+    pub last_fetch_error: Option<String>,
+    pub fetch_failing_since: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

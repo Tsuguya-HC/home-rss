@@ -9,6 +9,17 @@ interface FeedItemProps {
   onDelete: () => Promise<void>
 }
 
+function fetchFailingSinceText(since: number | null): string {
+  if (since == null) return ''
+  return new Date(since * 1000).toLocaleString()
+}
+
+function failureTitle(feed: Feed): string {
+  const since = fetchFailingSinceText(feed.fetch_failing_since)
+  if (since === '') return feed.last_fetch_error ?? ''
+  return `${feed.last_fetch_error} (${since})`
+}
+
 export function FeedItem({ feed, unreadCount, isSelected, onSelect, onDelete }: FeedItemProps) {
   const [confirmDelete, setConfirmDelete] = useState(false)
 
@@ -24,7 +35,14 @@ export function FeedItem({ feed, unreadCount, isSelected, onSelect, onDelete }: 
 
   return (
     <div className={`feed-item${isSelected ? ' feed-item--active' : ''}`} onClick={onSelect}>
-      <span className="feed-name">{feed.title || feed.url}</span>
+      <span className="feed-name">
+        {feed.title || feed.url}
+        {feed.last_fetch_error != null && (
+          <span className="fetch-warning" title={failureTitle(feed)}>
+            ⚠
+          </span>
+        )}
+      </span>
       <span className="feed-actions">
         {unreadCount > 0 && <span className="unread-badge">{unreadCount}</span>}
         <button

@@ -32,20 +32,20 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 | `POST /api/articles/read-all` | | R（全フィード） | W: 未読の全記事ぶん |
 | `POST /api/import/opml` | W: `INSERT … ON CONFLICT (url) DO NOTHING`。取得はしない | | |
 | `GET /api/stats` | R（件数） | R | R |
-| fetcher（`/fetch`） | R（`id, url, etag, last_modified` の全行）→ フィードごとに W | W | |
+| fetcher（`/fetch`） | R（`id, url, etag, last_modified` の全行）→ フィードごとに W（200 は記事と `feeds` の上書き、失敗は `last_fetch_error` / `fetch_failing_since` だけの独立 UPDATE、成功は同 2 列の消去） | W | |
 | cleaner（`/clean`） | | D（既読かつ古いもの） | 連鎖で D |
 
 即時取得と fetcher の取得は同じ `shared/src/fetch.rs` の `fetch_only()` が行い、保存は同じ `store()` を `store_fetched()` / `fetch_and_store()` 経由で呼ぶ。
 
-- 取得前に `reject_internal_feed_url()` を毎回通す。弾かれたら何も書かない
-- 条件付き GET（`If-None-Match` / `If-Modified-Since`）。**200 のときだけ**書く。304 と失敗では DB に触れない
+- 取得前に `reject_internal_feed_url()` を毎回通す。弾かれたら記事は書かず、fetcher では失敗の記録だけ書く。即時取得は DB に触れる前に弾くので何も書かない
+- 条件付き GET（`If-None-Match` / `If-Modified-Since`）。**200 のときだけ**記事と `feeds` の上書きを書く。304 は失敗の列だけ消し（`last_fetched_at` は更新しない）、取得の失敗は失敗の列だけ書く
 - 200 のとき、`articles` に全エントリを UNNEST の 1 文で `INSERT … ON CONFLICT DO NOTHING`。既存の記事は更新しない（タイトル・本文・`image_url` が後から変わっても反映されない）
 - 続けて `feeds` の `title` / `site_url` / `etag` / `last_modified` を今回の応答とフィードの値で**上書き**し（無ければ NULL）、`last_fetched_at = NOW()`。即時取得は `etag` / `last_modified` を渡さない（条件付き GET にしない）
 
 列ごとの書き手:
 
 - `feeds.url`: 追加と OPML インポートだけ。保存するのは `reject_internal_feed_url()` が返した正規化後の URL
-- `feeds` のそれ以外: 200 のときの `store()` だけ（即時取得は `store_fetched()` 経由、fetcher は `fetch_and_store()` 経由）
+- `feeds` のそれ以外: 200 のときの `store()` だけ（即時取得は `store_fetched()` 経由、fetcher は `fetch_and_store()` 経由）。ただし `last_fetch_error` / `fetch_failing_since` は `store()` では書かず、fetcher の `process_feed` の独立 UPDATE だけが書く・消す。即時取得はこの 2 列を書きも消しもしない
 - `articles`: `store()` の INSERT だけ（経路は同上）。UPDATE する経路は無い
 - `read_status`: 既読 API と全既読 API だけ
 
@@ -71,7 +71,8 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 
 - Spin の **http trigger**（route `/fetch`、メソッドは問わない）。1 リクエストで 1 回分の取得をする
 - 誰がいつ呼ぶか、前の回が終わる前に次を呼ぶかは**リポの外で決まる**
-- 1 回分の動き: `feeds` を 1 度だけ全件読み、1 件ずつ順に `fetch_and_store()`（タイムアウト無し）。1 件の失敗はログに出して次へ進み、応答は 200。DB 接続と最初の SELECT の失敗だけが 500
+- 1 回分の動き: `feeds` を 1 度だけ全件読み、1 件ずつ順に `fetch_and_store()`（タイムアウト無し）と失敗の記録の独立 UPDATE。1 件の失敗はログと失敗の列に残して次へ進み、応答は 200。DB 接続と最初の SELECT の失敗だけが 500
+- 失敗の列: `FetchFailed`（送信・受信のエラー、ガードでの拒否、200 / 304 以外の応答）と解釈不能な本文は `last_fetch_error`（200 文字で切る）に理由を書き、`fetch_failing_since` は連続失敗の始まりのまま上書きしない。200 か 304 なら両方を NULL に戻す（304 は `last_fetched_at` を更新しない）。保存の失敗は記録を変えない。一度も取得していない行には記録を作らない。即時取得はこの 2 列を書きも消しもしない
 - 読んだ後に追加されたフィードは、その回には取得されない
 
 ### cleaner
@@ -98,7 +99,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 
 | 組み合わせ | 起きること |
 |---|---|
-| 同じフィードの fetcher と即時取得（または fetcher 2 つ） | 記事は UNIQUE(`feed_id`, `url`) と `ON CONFLICT DO NOTHING` で重複しない。`feeds` の `title` / `etag` などは後から UPDATE した方が残る |
+| 同じフィードの fetcher と即時取得（または fetcher 2 つ） | 記事は UNIQUE(`feed_id`, `url`) と `ON CONFLICT DO NOTHING` で重複しない。`feeds` の `title` / `etag` などは後から UPDATE した方が残る。失敗の記録と即時取得の保存は別の列なので干渉しない |
 | 取得中にそのフィードを `DELETE` | 即時取得は取得中に行ロックを取らないので、取得中の DELETE は待たずに実行される。DELETE が INSERT より先なら INSERT が新規行を作り直して保存は成功し 201 を返す（残骸になる。再追加の取得は終わっているので取り直さない）。INSERT と保存の書き込みは 1 トランザクションで行ロックを保持するので、その間に来た DELETE は COMMIT/ROLLBACK まで待ってから実行されるだけ |
 | cleaner が消した記事がまだフィードに載っている | 次に 200 が返ると UNIQUE に当たらないので、**未読の新しい行として入り直す**（304 なら入らない） |
 | cleaner / フィード削除で消えた記事を UI で開く | 既読 API が外部キー違反で 500。UI は再読み込みまで消えた記事を表示し続け、開くたびに既読 API を呼ぶ |
@@ -130,7 +131,13 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 ### 取得と保存
 
 - 200 だけを取得成功とし、304 は変更無し、それ以外は失敗 — `shared/src/fetch.rs`: `classifies_ok_not_modified_and_unexpected`
-- 304 と失敗では DB に触れない（`last_fetched_at` も更新しない） — テスト無し
+- 取得結果を失敗の記録の「書く（理由付き）/消す/変えない」に振り分ける — `shared/src/fetch.rs`: `fetch_failed_is_recorded_with_a_reason`, `unparseable_body_is_recorded_with_a_reason`, `stored_feed_clears_the_failure_record`, `not_modified_clears_the_failure_record`, `store_failed_keeps_the_failure_record`, `record_reason_is_truncated_to_200_chars`
+- ガードで弾かれた定期取得は失敗として記録し、連続失敗中は始まりの時刻を上書きしない — e2e: `fetcher_records_a_fetch_rejected_by_the_url_guard`
+- 一度も取得していないフィードには失敗の記録を作らない — e2e: `fetcher_leaves_a_never_fetched_feed_unmarked`
+- 失敗の列は `GET /api/feeds` に出る（時刻はエポック秒） — e2e: `list_feeds_exposes_the_recorded_fetch_failure`
+- 既存フィードの再追加の成否は失敗の記録を書きも消しもしない — e2e: `readding_a_failing_feed_leaves_its_failure_record_untouched`
+- 失敗中のフィードだけサイドバーに警告マーク（⚠）を出し、理由と失敗し始めた時刻を `title` に入れる。失敗していなければ出さない — `ui/src/components/FeedItem.test.tsx`: `shows a warning mark with the reason while the feed keeps failing`, `shows no warning mark while the feed is not failing`
+- 304 は失敗の列だけ消し（`last_fetched_at` は更新しない）、記事と `feeds` の上書きは 200 のときだけ書く — `shared/src/fetch.rs`: `not_modified_clears_the_failure_record`（記録消しの分岐まで。304 用 UPDATE 文が 2 列だけを SET することはテスト無し）
 - 既存の記事は上書きしない。同じフィード・同じ URL の記事は 1 行だけ — テスト無し
 - 1 フィードの失敗で fetcher の他のフィードを止めない — テスト無し
 - パースできない本文はエラーにする — `shared/src/feed.rs`: `unparseable_body_is_an_error`

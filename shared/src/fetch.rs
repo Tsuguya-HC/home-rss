@@ -4,7 +4,7 @@ use crate::ssrf::reject_internal_feed_url;
 use anyhow::{Context, Result};
 use spin_sdk::http::body::IncomingBodyExt;
 use spin_sdk::http::{EmptyBody, Request, Response, StatusCode, send};
-use spin_sdk::pg::{Connection, Decode, ParameterValue, Row};
+use spin_sdk::pg::{Connection, DbValue, Decode, ParameterValue};
 use std::time::Duration;
 
 /// POST /api/feeds の即時取得 (#106) と定期取得 (fetcher) で共有する
@@ -12,6 +12,11 @@ use std::time::Duration;
 /// 条件付き GET のヘッダ付与・304 の扱い・パース・articles INSERT・feeds
 /// UPDATE (etag/last_modified 含む) を一箇所にまとめ、両経路の間で扱いが
 /// 乖離しないようにする (#106 R2)。
+/// `Stored(Feed)` とエラー 3 系列の大きさの差は許容する: `Stored` を Box 化
+/// する案は却下。構築と分配の全箇所と単体テストの fixture に触り、#245 の
+/// 差分と無関係な変更が広がる。1 回の取得ごとに enum を 1 値だけ運ぶので、
+/// 大きい variant をヒープに逃がす利得は無い。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum FetchAndStoreOutcome {
     /// 304 Not Modified。DB には触れていない。
@@ -283,7 +288,8 @@ async fn store(
              last_fetched_at = NOW() WHERE id = $5 \
              RETURNING id::text, url, title, site_url, etag, last_modified, \
              EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
+             EXTRACT(EPOCH FROM created_at)::bigint, last_fetch_error, \
+             EXTRACT(EPOCH FROM fetch_failing_since)::bigint",
             vec![
                 parsed.title.clone().into(),
                 parsed.site_url.clone().into(),
@@ -307,11 +313,15 @@ async fn store(
 }
 
 /// `SELECT id::text, url, title, site_url, etag, last_modified, \
-///  EXTRACT(EPOCH FROM last_fetched_at)::bigint, EXTRACT(EPOCH FROM created_at)::bigint`
+///  EXTRACT(EPOCH FROM last_fetched_at)::bigint, EXTRACT(EPOCH FROM created_at)::bigint, \
+///  last_fetch_error, EXTRACT(EPOCH FROM fetch_failing_since)::bigint`
 /// の列順に対応する行デコード。取得+保存の共有処理とここ (server の一覧/追加系
 /// クエリ) の両方から使う (#106)。永続化に依存しない DTO である
 /// `shared::models` を汚さないよう、ここ (feed feature 配下) に置く (#106 R6)。
-pub fn decode_feed_row(row: &Row) -> Result<Feed> {
+/// `&Row` ではなく `Index` で受ける案: `Row` に公開コンストラクタが無く
+/// 単体テストで値を構築できないため、`DbValue` のベクタで通せる境界に緩める。
+/// 呼び出し側は `&Row` のまま (`Row: Index<usize, Output = DbValue>`) 変えない。
+pub fn decode_feed_row(row: &impl std::ops::Index<usize, Output = DbValue>) -> Result<Feed> {
     Ok(Feed {
         id: String::decode(&row[0])?,
         url: String::decode(&row[1])?,
@@ -321,6 +331,8 @@ pub fn decode_feed_row(row: &Row) -> Result<Feed> {
         last_modified: Option::<String>::decode(&row[5])?,
         last_fetched_at: Option::<i64>::decode(&row[6])?,
         created_at: Option::<i64>::decode(&row[7])?,
+        last_fetch_error: Option::<String>::decode(&row[8])?,
+        fetch_failing_since: Option::<i64>::decode(&row[9])?,
     })
 }
 
@@ -330,6 +342,43 @@ pub enum StatusOutcome {
     Ok,
     NotModified,
     Unexpected(StatusCode),
+}
+
+/// 定期取得の結果を、失敗の記録を「書く（理由付き）/消す/変えない」の
+/// いずれかに振り分ける純粋関数 (#245)。SQL は持たない。理由は
+/// `last_fetch_error` に入れる 200 文字以内の文言そのもの。
+#[derive(Debug, PartialEq, Eq)]
+pub enum FetchFailureAction {
+    Record { reason: String },
+    Clear,
+    Keep,
+}
+
+/// `FetchFailed` と `Unparseable` のエラー文面をそのまま残し、200 文字で切る。
+/// 文面の先頭に種類（HTTP ステータス・ガードの拒否・送信エラー等）が入って
+/// いるので切り直さない (#245)。200 文字制限は `last_fetch_error` の
+/// 長さを抑えるため。成功 (`Stored` / `NotModified`) は `Clear`、保存失敗
+/// (`StoreFailed`) は `Keep`。
+pub fn classify_fetch_failure(outcome: &FetchAndStoreOutcome) -> FetchFailureAction {
+    match outcome {
+        FetchAndStoreOutcome::FetchFailed(e) | FetchAndStoreOutcome::Unparseable(e) => {
+            FetchFailureAction::Record {
+                reason: truncate_chars(&format!("{e:#}"), 200),
+            }
+        }
+        FetchAndStoreOutcome::Stored(_) | FetchAndStoreOutcome::NotModified => {
+            FetchFailureAction::Clear
+        }
+        FetchAndStoreOutcome::StoreFailed(_) => FetchFailureAction::Keep,
+    }
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_owned()
+    } else {
+        s.chars().take(max).collect()
+    }
 }
 
 pub fn classify_status(status: StatusCode) -> StatusOutcome {
@@ -376,9 +425,64 @@ fn header_string(resp: &Response, name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{StatusOutcome, await_with_optional_timeout, classify_status, with_timeout};
+    use super::{
+        FetchAndStoreOutcome, FetchFailureAction, StatusOutcome, await_with_optional_timeout,
+        classify_fetch_failure, classify_status, with_timeout,
+    };
     use futures_util::FutureExt;
     use spin_sdk::http::StatusCode;
+    use spin_sdk::pg::DbValue;
+
+    fn feed_row_values() -> Vec<DbValue> {
+        // decode_feed_row が読む 10 列順の fixture (#245)。新 2 列
+        // (last_fetch_error, fetch_failing_since) が両方入った行で、
+        // 対応するデコード行を通して値を検証する。
+        vec![
+            DbValue::Str("00000000-0000-0000-0000-000000000000".to_owned()),
+            DbValue::Str("https://example.com/feed".to_owned()),
+            DbValue::DbNull,
+            DbValue::DbNull,
+            DbValue::DbNull,
+            DbValue::DbNull,
+            DbValue::DbNull,
+            DbValue::DbNull,
+            DbValue::Str("HTTP 404".to_owned()),
+            DbValue::Int64(1_700_000_000),
+        ]
+    }
+
+    #[test]
+    fn decode_feed_row_reads_the_failure_columns() {
+        let row = feed_row_values();
+        let feed = super::decode_feed_row(&row).expect("fixture decodes");
+        assert_eq!(feed.last_fetch_error.as_deref(), Some("HTTP 404"));
+        assert_eq!(feed.fetch_failing_since, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn decode_feed_row_accepts_a_null_failure_record() {
+        let mut row = feed_row_values();
+        row[8] = DbValue::DbNull;
+        row[9] = DbValue::DbNull;
+        let feed = super::decode_feed_row(&row).expect("fixture decodes");
+        assert_eq!(feed.last_fetch_error, None);
+        assert_eq!(feed.fetch_failing_since, None);
+    }
+
+    fn stored_feed() -> super::Feed {
+        super::Feed {
+            id: "00000000-0000-0000-0000-000000000000".to_owned(),
+            url: "https://example.com/feed".to_owned(),
+            title: None,
+            site_url: None,
+            etag: None,
+            last_modified: None,
+            last_fetched_at: None,
+            created_at: None,
+            last_fetch_error: None,
+            fetch_failing_since: None,
+        }
+    }
 
     #[test]
     fn classifies_ok_not_modified_and_unexpected() {
@@ -412,5 +516,74 @@ mod tests {
         // 崩れると定期取得が常に FetchFailed になる。
         let result = await_with_optional_timeout(None, async { 42 }).now_or_never();
         assert_eq!(result, Some(Some(42)));
+    }
+
+    #[test]
+    fn fetch_failed_is_recorded_with_a_reason() {
+        // FetchFailed（送信・受信のエラー、ガードでの拒否、想定外ステータスを
+        // 含む）は失敗として記録し、理由を残す (#245)。
+        let outcome =
+            FetchAndStoreOutcome::FetchFailed(anyhow::anyhow!("HTTP 404 fetching https://x/feed"));
+        match classify_fetch_failure(&outcome) {
+            FetchFailureAction::Record { reason } => {
+                assert!(reason.contains("404"));
+                assert!(reason.chars().count() <= 200);
+            }
+            FetchFailureAction::Clear | FetchFailureAction::Keep => {
+                panic!("FetchFailed must be recorded, not cleared or kept")
+            }
+        }
+    }
+
+    #[test]
+    fn unparseable_body_is_recorded_with_a_reason() {
+        // フィードとして解釈できない本文も失敗として記録する (#245)。
+        let outcome =
+            FetchAndStoreOutcome::Unparseable(anyhow::anyhow!("feed could not be parsed"));
+        match classify_fetch_failure(&outcome) {
+            FetchFailureAction::Record { reason } => {
+                assert!(!reason.is_empty());
+                assert!(reason.chars().count() <= 200);
+            }
+            FetchFailureAction::Clear | FetchFailureAction::Keep => {
+                panic!("Unparseable must be recorded, not cleared or kept")
+            }
+        }
+    }
+
+    #[test]
+    fn stored_feed_clears_the_failure_record() {
+        // 200 で取得・保存できたら記録を消す (#245)。
+        let outcome = FetchAndStoreOutcome::Stored(stored_feed());
+        assert_eq!(classify_fetch_failure(&outcome), FetchFailureAction::Clear);
+    }
+
+    #[test]
+    fn not_modified_clears_the_failure_record() {
+        // 304 でも記録を消す (#245)。
+        let outcome = FetchAndStoreOutcome::NotModified;
+        assert_eq!(classify_fetch_failure(&outcome), FetchFailureAction::Clear);
+    }
+
+    #[test]
+    fn store_failed_keeps_the_failure_record() {
+        // DB への保存の失敗は記録を変えない（残っていれば残す、無ければ作らない）(#245)。
+        let outcome = FetchAndStoreOutcome::StoreFailed(anyhow::anyhow!("db down"));
+        assert_eq!(classify_fetch_failure(&outcome), FetchFailureAction::Keep);
+    }
+
+    #[test]
+    fn record_reason_is_truncated_to_200_chars() {
+        // last_fetch_error は 200 文字で切る (#245)。
+        let long = "e".repeat(500);
+        let outcome = FetchAndStoreOutcome::FetchFailed(anyhow::anyhow!("{long}"));
+        match classify_fetch_failure(&outcome) {
+            FetchFailureAction::Record { reason } => {
+                assert!(reason.chars().count() <= 200);
+            }
+            FetchFailureAction::Clear | FetchFailureAction::Keep => {
+                panic!("FetchFailed must be recorded, not cleared or kept")
+            }
+        }
     }
 }

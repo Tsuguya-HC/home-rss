@@ -54,6 +54,10 @@ fn error_response(status: StatusCode, message: &str) -> Resp {
 /// POST /api/feeds の追加直後取得の結果 → HTTP 応答への写像 (#106)。
 /// 取得の失敗（到達不能・パース不能）はフィード取得自体の失敗としてユーザーに伝え、
 /// DB 書き込みの失敗はサーバ側の障害として区別して伝える。成功パスのみ 201 を使う。
+/// `Fetched(Feed)` と空 variant の大きさの差は許容する: Box 化は却下。組み立てと
+/// 分配の全箇所に触り、#245 の差分と無関係な変更が広がる。1 回の追加ごとに
+/// enum を 1 値だけ運ぶので、ヒープに逃がす利得は無い。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum ImmediateFetchOutcome {
     /// その場で取得でき、記事が入った（通常の 201 応答）。
@@ -107,7 +111,8 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
 
 const FEED_SELECT: &str = "SELECT id::text, url, title, site_url, etag, last_modified, \
      EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-     EXTRACT(EPOCH FROM created_at)::bigint \
+     EXTRACT(EPOCH FROM created_at)::bigint, last_fetch_error, \
+     EXTRACT(EPOCH FROM fetch_failing_since)::bigint \
      FROM feeds";
 
 const ARTICLE_SELECT: &str = "SELECT a.id::text, a.feed_id::text, a.url, a.title, a.content, a.author, \
@@ -185,7 +190,8 @@ async fn add_feed(req: Request) -> Result<Resp> {
                          ON CONFLICT (url) DO UPDATE SET url = EXCLUDED.url \
                          RETURNING id::text, url, title, site_url, etag, last_modified, \
                          EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-                         EXTRACT(EPOCH FROM created_at)::bigint, (xmax::text = '0')",
+                         EXTRACT(EPOCH FROM created_at)::bigint, last_fetch_error, \
+                         EXTRACT(EPOCH FROM fetch_failing_since)::bigint, (xmax::text = '0')",
                         vec![ParameterValue::Str(url_text.clone())],
                     )
                     .await?
@@ -195,7 +201,7 @@ async fn add_feed(req: Request) -> Result<Resp> {
                 let row = rows.first().ok_or_else(|| {
                     anyhow::anyhow!("INSERT INTO feeds RETURNING returned no rows for {url_text}")
                 })?;
-                let is_new = bool::decode(&row[8])?;
+                let is_new = bool::decode(&row[10])?;
                 let feed = row_to_feed(row)?;
                 let outcome = immediate_store(
                     &conn,
@@ -583,6 +589,8 @@ mod tests {
             last_modified: None,
             last_fetched_at: None,
             created_at: None,
+            last_fetch_error: None,
+            fetch_failing_since: None,
         }
     }
 

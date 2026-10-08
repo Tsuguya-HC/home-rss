@@ -72,6 +72,10 @@ fn server(path: &str) -> String {
     format!("{}{path}", env("E2E_SERVER_URL"))
 }
 
+fn fetcher(path: &str) -> String {
+    format!("{}{path}", env("E2E_FETCHER_URL"))
+}
+
 async fn get_json(path: &str) -> (u16, Value) {
     let resp = reqwest::get(server(path)).await.expect("GET");
     let status = resp.status().as_u16();
@@ -315,6 +319,138 @@ async fn readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged() {
     assert_eq!(kept_url, url);
     assert_eq!(kept_title.as_deref(), Some("Original Title"));
     assert_eq!(count(&db, "SELECT COUNT(*) FROM articles").await, 1);
+}
+
+#[tokio::test]
+async fn fetcher_records_a_fetch_rejected_by_the_url_guard() {
+    // URL ガードで弾かれた定期取得は失敗として記録される (#245)。
+    // `https://localhost/feed` はネットワークに触れずにガードで拒否される。
+    let db = fresh_db().await;
+    let id = seed_feed(&db, "https://localhost/feed").await;
+    // 一度も取得していないフィードには印を付けない、との区別のため、
+    // このフィードは取得済み (last_fetched_at NOT NULL) にしておく。
+    db.execute(
+        "UPDATE feeds SET last_fetched_at = now() WHERE id = $1::text::uuid",
+        &[&id],
+    )
+    .await
+    .expect("mark feed fetched");
+
+    let resp = reqwest::Client::new()
+        .post(fetcher("/fetch"))
+        .send()
+        .await
+        .expect("POST /fetch");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let row = db
+        .query_one(
+            "SELECT last_fetch_error, EXTRACT(EPOCH FROM fetch_failing_since)::bigint FROM feeds WHERE id = $1::text::uuid",
+            &[&id],
+        )
+        .await
+        .expect("read failure record");
+    let reason: Option<String> = row.get(0);
+    let since: Option<i64> = row.get(1);
+    assert!(reason.is_some_and(|r| !r.is_empty()));
+    assert!(since.is_some());
+
+    // 失敗が続いている間は fetch_failing_since を上書きしない (#245)。
+    // もう一度 /fetch を回しても始まりの時刻は変わらない。
+    let resp = reqwest::Client::new()
+        .post(fetcher("/fetch"))
+        .send()
+        .await
+        .expect("POST /fetch again");
+    assert_eq!(resp.status().as_u16(), 200);
+    let row = db
+        .query_one(
+            "SELECT EXTRACT(EPOCH FROM fetch_failing_since)::bigint FROM feeds WHERE id = $1::text::uuid",
+            &[&id],
+        )
+        .await
+        .expect("read failure record again");
+    let since_again: Option<i64> = row.get(0);
+    assert_eq!(since_again, since);
+}
+
+#[tokio::test]
+async fn fetcher_leaves_a_never_fetched_feed_unmarked() {
+    // 一度も取得していないフィード (OPML から入れた直後など) には
+    // 印を付けない (#245)。ガードで弾かれても記録を作らない。
+    let db = fresh_db().await;
+    let id = seed_feed(&db, "https://localhost/feed").await;
+
+    let resp = reqwest::Client::new()
+        .post(fetcher("/fetch"))
+        .send()
+        .await
+        .expect("POST /fetch");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let row = db
+        .query_one(
+            "SELECT last_fetch_error IS NULL, fetch_failing_since IS NULL FROM feeds WHERE id = $1::text::uuid",
+            &[&id],
+        )
+        .await
+        .expect("read failure record");
+    let reason_is_null: bool = row.get(0);
+    let since_is_null: bool = row.get(1);
+    assert!(reason_is_null);
+    assert!(since_is_null);
+}
+
+#[tokio::test]
+async fn list_feeds_exposes_the_recorded_fetch_failure() {
+    // DB に直接入れた失敗の列が GET /api/feeds に出る (#245)。
+    let db = fresh_db().await;
+    let id = seed_feed(&db, "https://a.example/feed").await;
+    db.execute(
+        "UPDATE feeds SET last_fetch_error = $1, fetch_failing_since = now() WHERE id = $2::text::uuid",
+        &[&"HTTP 404", &id],
+    )
+    .await
+    .expect("seed failure record");
+
+    let (status, body) = get_json("/api/feeds").await;
+    assert_eq!(status, 200);
+    let feeds = body.as_array().expect("array of feeds");
+    assert_eq!(feeds.len(), 1);
+    assert_eq!(feeds[0]["id"], id.as_str());
+    assert_eq!(feeds[0]["last_fetch_error"], "HTTP 404");
+    assert!(feeds[0]["fetch_failing_since"].is_number());
+}
+
+#[tokio::test]
+async fn readding_a_failing_feed_leaves_its_failure_record_untouched() {
+    // 即時取得 (POST /api/feeds) の成否は失敗の記録を書きも消しもしない
+    // (#245)。既存フィードの再追加が失敗しても、失敗の列はそのまま残る。
+    // 同じ never-resolving `.invalid` URL で取得を失敗させる。
+    let db = fresh_db().await;
+    let url = "https://no-such-feed.invalid/feed";
+    let id = seed_feed(&db, url).await;
+    db.execute(
+        "UPDATE feeds SET last_fetch_error = $1, fetch_failing_since = now() WHERE id = $2::text::uuid",
+        &[&"HTTP 404", &id],
+    )
+    .await
+    .expect("seed failure record");
+
+    let body = format!(r#"{{"url":"{url}"}}"#);
+    assert_eq!(post("/api/feeds", Some(&body)).await, 502);
+
+    let row = db
+        .query_one(
+            "SELECT last_fetch_error, fetch_failing_since IS NULL FROM feeds WHERE id = $1::text::uuid",
+            &[&id],
+        )
+        .await
+        .expect("read failure record");
+    let reason: Option<String> = row.get(0);
+    let since_is_null: bool = row.get(1);
+    assert_eq!(reason.as_deref(), Some("HTTP 404"));
+    assert!(!since_is_null);
 }
 
 #[tokio::test]
