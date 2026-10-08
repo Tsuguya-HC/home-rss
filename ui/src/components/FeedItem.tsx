@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Feed } from '../types'
+import { formatDateTime } from '../lib/date'
 
 interface FeedItemProps {
   feed: Feed
@@ -13,7 +14,7 @@ export function formatFailingSince(fetchFailingSince: number | null): string {
   if (fetchFailingSince == null) {
     return '日時不明'
   }
-  return new Date(fetchFailingSince * 1000).toLocaleString()
+  return formatDateTime(fetchFailingSince)
 }
 
 export function FeedItem({ feed, unreadCount, isSelected, onSelect, onDelete }: FeedItemProps) {
@@ -35,7 +36,7 @@ export function FeedItem({ feed, unreadCount, isSelected, onSelect, onDelete }: 
       {feed.last_fetch_error != null && (
         <span
           className="fetch-failure"
-          title={`${feed.last_fetch_error} (${formatFailingSince(feed.fetch_failing_since)}）`}
+          title={`${feed.last_fetch_error} (${formatFailingSince(feed.fetch_failing_since)})`}
         >
           ⚠
         </span>

@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { FeedItem } from './FeedItem'
+import { FeedItem, formatFailingSince } from './FeedItem'
 import { Feed } from '../types'
+import { formatDateTime } from '../lib/date'
 
 const feed: Feed = {
   id: 'f1',
@@ -82,6 +83,34 @@ describe('FeedItem', () => {
     const mark = screen.getByTitle(/HTTP 404/)
     expect(mark.textContent).toContain('⚠')
     expect(mark.getAttribute('title')).toContain(String(new Date(1757894400 * 1000).getFullYear()))
+  })
+
+  it('closes the warning title with a half-width paren', () => {
+    // Catches the full-width closing paren (U+FF09) mismatching the
+    // half-width opener in the failure warning title (#245).
+    const failing = {
+      ...feed,
+      last_fetch_error: 'HTTP 404',
+      fetch_failing_since: 1757894400,
+    } as unknown as Feed
+    render(
+      <FeedItem
+        feed={failing}
+        unreadCount={0}
+        isSelected={false}
+        onSelect={() => {}}
+        onDelete={async () => {}}
+      />,
+    )
+    const title = screen.getByTitle(/HTTP 404/).getAttribute('title') ?? ''
+    expect(title).toContain(')')
+    expect(title).not.toContain('）')
+  })
+
+  it('formats the failure start time like the shared date formatter', () => {
+    // Catches formatFailingSince assembling its own locale-dependent string
+    // instead of the shared ja-JP formatter used for article dates (#245).
+    expect(formatFailingSince(1757894400)).toBe(formatDateTime(1757894400))
   })
 
   it('shows no failure warning for a healthy feed', () => {

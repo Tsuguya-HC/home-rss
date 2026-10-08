@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end suite: build the server and the cleaner, apply migrations/, run both
-# under `spin up` against the given PostgreSQL, and run e2e/tests.
+# End-to-end suite: build the server, the cleaner, and the fetcher, apply migrations/, run all
+# three under `spin up` against the given PostgreSQL, and run e2e/tests.
 #
 #   E2E_DATABASE_URL=postgres://user:pass@host:5432/db?sslmode=disable e2e/run.sh
 #

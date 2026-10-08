@@ -32,7 +32,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 | `POST /api/articles/read-all` | | R（全フィード） | W: 未読の全記事ぶん |
 | `POST /api/import/opml` | W: `INSERT … ON CONFLICT (url) DO NOTHING`。取得はしない | | |
 | `GET /api/stats` | R（件数） | R | R |
-| fetcher（`/fetch`） | R（`id, url, etag, last_modified` の全行）→ フィードごとに W（200 / 304 の保存と失敗の記録） | W | |
+| fetcher（`/fetch`） | R（`id, url, etag, last_modified, (last_fetched_at IS NOT NULL)` の全行）→ フィードごとに W（200 / 304 の保存と失敗の記録） | W | |
 | cleaner（`/clean`） | | D（既読かつ古いもの） | 連鎖で D |
 
 即時取得と fetcher の取得は同じ `shared/src/fetch.rs` の `fetch_only()` が行い、保存は同じ `store()` を `store_fetched()` / `fetch_and_store()` 経由で呼ぶ。
@@ -133,7 +133,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 ### 取得と保存
 
 - 200 だけを取得成功とし、304 は変更無し、それ以外は失敗 — `shared/src/fetch.rs`: `classifies_ok_not_modified_and_unexpected`
-- 304 は記事と取得由来の列（`last_fetched_at` を含む）に触れず、失敗の記録だけ消す。取得の失敗は取得由来の列に触れず、失敗の記録だけ書く — e2e: `fetcher_records_a_guard_rejection_but_leaves_never_fetched_feeds_unmarked`
+- 304 は記事と取得由来の列（`last_fetched_at` を含む）に触れず、失敗の記録だけ消す（304 で消すことはテスト無し）。取得の失敗は取得由来の列に触れず、失敗の記録だけ書く — e2e: `fetcher_records_a_guard_rejection_but_leaves_never_fetched_feeds_unmarked`（取得の失敗の記録まで）
 - 失敗の記録の振り分け（記録する / 消す / 変えない）は `shared/src/fetch_failure.rs` の `decide_fetch_failure_action` が決め、取得結果との対応付けは `shared/src/fetch.rs` の `fetch_failure_action` が担う — `shared/tests/fetch_failure_classification.rs`: `fetch_failed_with_prior_fetch_is_recorded`, `unparseable_with_prior_fetch_is_recorded`, `stored_clears_the_record`, `not_modified_clears_the_record`, `store_failed_keeps_the_record_untouched`, `failure_of_never_fetched_feed_leaves_no_mark`, `record_reason_is_cut_at_200_chars`; `shared/src/fetch.rs`: `outcome_maps_to_record_clear_and_keep`
 - 失敗中のフィードは `GET /api/feeds` が `last_fetch_error` とエポック秒の `fetch_failing_since` を返し、UI はサイドバーのフィード名の横に警告マーク（⚠、理由と失敗し始めた時刻を `title` に）を出す — e2e: `list_feeds_exposes_the_failure_columns`; `ui/src/components/FeedItem.test.tsx`: `shows a failure warning with reason and start time`, `shows no failure warning for a healthy feed`
 - 既存の記事は上書きしない。同じフィード・同じ URL の記事は 1 行だけ — テスト無し
