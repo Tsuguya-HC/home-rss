@@ -318,6 +318,71 @@ async fn readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged() {
 }
 
 #[tokio::test]
+async fn fetcher_records_a_guard_rejection_as_a_fetch_failure() {
+    // #245: the SSRF guard rejects this URL inside the scheduled fetch, so
+    // the fetcher must leave a failure record instead of only a log line.
+    // Nothing past the guard is touched, so no external network is involved.
+    let db = fresh_db().await;
+    let id = seed_feed(&db, "https://localhost/feed").await;
+    // The failure record is only left for feeds fetched at least once
+    // (#245: no mark on never-fetched rows), so pretend a previous fetch
+    // happened. The rejection itself is still what the assertions check.
+    db.execute(
+        "UPDATE feeds SET last_fetched_at = NOW() WHERE id = $1::text::uuid",
+        &[&id],
+    )
+    .await
+    .expect("pretend a previous fetch");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/fetch", env("E2E_FETCHER_URL")))
+        .send()
+        .await
+        .expect("POST /fetch");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let row = db
+        .query_one(
+            "SELECT last_fetch_error, fetch_failing_since IS NOT NULL FROM feeds \
+             WHERE id = $1::text::uuid",
+            &[&id],
+        )
+        .await
+        .expect("read the failure record");
+    let reason: Option<String> = row.get(0);
+    let failing: bool = row.get(1);
+    assert!(
+        failing,
+        "a rejected scheduled fetch must mark the feed as failing"
+    );
+    assert!(
+        reason.map(|r| !r.is_empty()).unwrap_or(false),
+        "the failure record must carry a reason"
+    );
+}
+
+#[tokio::test]
+async fn list_feeds_exposes_the_failure_record_keys() {
+    // #245: feeds that never failed must still carry null failure keys so
+    // the UI can tell "never failed" from "failing".
+    let db = fresh_db().await;
+    seed_feed(&db, "https://a.example/feed").await;
+
+    let (status, body) = get_json("/api/feeds").await;
+    assert_eq!(status, 200);
+    let feed = &body.as_array().expect("array of feeds")[0];
+    let obj = feed.as_object().expect("feed object");
+    assert!(
+        obj.contains_key("last_fetch_error"),
+        "GET /api/feeds must expose last_fetch_error, got {feed}"
+    );
+    assert!(
+        obj.contains_key("fetch_failing_since"),
+        "GET /api/feeds must expose fetch_failing_since, got {feed}"
+    );
+}
+
+#[tokio::test]
 async fn cleaner_deletes_only_read_articles_past_retention() {
     let db = fresh_db().await;
     let feed = seed_feed(&db, "https://a.example/feed").await;

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Feed } from '../types'
+import { formatDateTime } from '../lib/date'
 
 interface FeedItemProps {
   feed: Feed
@@ -25,6 +26,14 @@ export function FeedItem({ feed, unreadCount, isSelected, onSelect, onDelete }: 
   return (
     <div className={`feed-item${isSelected ? ' feed-item--active' : ''}`} onClick={onSelect}>
       <span className="feed-name">{feed.title || feed.url}</span>
+      {feed.last_fetch_error != null && feed.fetch_failing_since != null && (
+        <span
+          className="feed-failure"
+          title={`${feed.last_fetch_error} (${formatDateTime(feed.fetch_failing_since)} から失敗中)`}
+        >
+          ⚠
+        </span>
+      )}
       <span className="feed-actions">
         {unreadCount > 0 && <span className="unread-badge">{unreadCount}</span>}
         <button

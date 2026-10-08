@@ -13,15 +13,18 @@ const feed: Feed = {
   last_modified: null,
   last_fetched_at: null,
   created_at: null,
+  last_fetch_error: null,
+  fetch_failing_since: null,
 }
 
 function renderItem(
   onDelete = vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
   onSelect = vi.fn<() => void>(),
+  feedOverrides: Partial<Feed> = {},
 ) {
   render(
     <FeedItem
-      feed={feed}
+      feed={{ ...feed, ...feedOverrides }}
       unreadCount={0}
       isSelected={false}
       onSelect={onSelect}
@@ -58,5 +61,25 @@ describe('FeedItem', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('shows no warning when the feed is not failing', () => {
+    renderItem(vi.fn().mockResolvedValue(undefined), vi.fn(), {
+      last_fetch_error: null,
+      fetch_failing_since: null,
+    })
+    expect(screen.queryByText('⚠')).toBeNull()
+  })
+
+  it('shows a warning with the reason and failing-since time', () => {
+    const failingSince = 1_757_894_400
+    renderItem(vi.fn().mockResolvedValue(undefined), vi.fn(), {
+      last_fetch_error: 'HTTP 404',
+      fetch_failing_since: failingSince,
+    })
+    const warning = screen.getByText('⚠')
+    const title = warning.getAttribute('title') ?? ''
+    expect(title).toContain('HTTP 404')
+    expect(title).toContain(String(new Date(failingSince * 1000).getFullYear()))
   })
 })

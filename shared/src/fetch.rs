@@ -4,7 +4,7 @@ use crate::ssrf::reject_internal_feed_url;
 use anyhow::{Context, Result};
 use spin_sdk::http::body::IncomingBodyExt;
 use spin_sdk::http::{EmptyBody, Request, Response, StatusCode, send};
-use spin_sdk::pg::{Connection, Decode, ParameterValue, Row};
+use spin_sdk::pg::{Connection, DbValue, Decode, ParameterValue};
 use std::time::Duration;
 
 /// POST /api/feeds の即時取得 (#106) と定期取得 (fetcher) で共有する
@@ -17,7 +17,10 @@ pub enum FetchAndStoreOutcome {
     /// 304 Not Modified。DB には触れていない。
     NotModified,
     /// 取得・保存に成功した。更新後の feed 行 (UPDATE ... RETURNING の結果) を返す。
-    Stored(Feed),
+    /// Box 化しているのは `Feed` の拡張 (#245) で enum 全体のサイズが膨らみ
+    /// `large_enum_variant` に当たるため。`FetchFailed` 等の小さい variant を
+    /// 返すたびに大きい `Feed` ぶんの領域をスタックに確保しないための措置。
+    Stored(Box<Feed>),
     /// URL がスキーム/ポート/内部ホストのガードで弾かれた、到達不能・想定外
     /// ステータス・タイムアウトなど、取得自体の失敗。
     FetchFailed(anyhow::Error),
@@ -207,7 +210,7 @@ pub async fn fetch_and_store(
         )
         .await
         {
-            Ok(feed) => FetchAndStoreOutcome::Stored(feed),
+            Ok(feed) => FetchAndStoreOutcome::Stored(Box::new(feed)),
             Err(e) => FetchAndStoreOutcome::StoreFailed(e),
         },
     }
@@ -283,7 +286,8 @@ async fn store(
              last_fetched_at = NOW() WHERE id = $5 \
              RETURNING id::text, url, title, site_url, etag, last_modified, \
              EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
+             EXTRACT(EPOCH FROM created_at)::bigint, last_fetch_error, \
+             EXTRACT(EPOCH FROM fetch_failing_since)::bigint",
             vec![
                 parsed.title.clone().into(),
                 parsed.site_url.clone().into(),
@@ -307,11 +311,15 @@ async fn store(
 }
 
 /// `SELECT id::text, url, title, site_url, etag, last_modified, \
-///  EXTRACT(EPOCH FROM last_fetched_at)::bigint, EXTRACT(EPOCH FROM created_at)::bigint`
+///  EXTRACT(EPOCH FROM last_fetched_at)::bigint, EXTRACT(EPOCH FROM created_at)::bigint, \
+///  last_fetch_error, EXTRACT(EPOCH FROM fetch_failing_since)::bigint`
 /// の列順に対応する行デコード。取得+保存の共有処理とここ (server の一覧/追加系
 /// クエリ) の両方から使う (#106)。永続化に依存しない DTO である
 /// `shared::models` を汚さないよう、ここ (feed feature 配下) に置く (#106 R6)。
-pub fn decode_feed_row(row: &Row) -> Result<Feed> {
+/// `&Row` ではなく `Index` で受けるのは、`Row` に公開コンストラクタが無く
+/// 単体テストで構築できないため (`Vec<DbValue>` を渡して全列のデコードを
+/// 固定する。#245)。呼び出し側の `&Row` はそのまま渡せる。
+pub fn decode_feed_row(row: &impl std::ops::Index<usize, Output = DbValue>) -> Result<Feed> {
     Ok(Feed {
         id: String::decode(&row[0])?,
         url: String::decode(&row[1])?,
@@ -321,6 +329,8 @@ pub fn decode_feed_row(row: &Row) -> Result<Feed> {
         last_modified: Option::<String>::decode(&row[5])?,
         last_fetched_at: Option::<i64>::decode(&row[6])?,
         created_at: Option::<i64>::decode(&row[7])?,
+        last_fetch_error: Option::<String>::decode(&row[8])?,
+        fetch_failing_since: Option::<i64>::decode(&row[9])?,
     })
 }
 
@@ -338,6 +348,40 @@ pub fn classify_status(status: StatusCode) -> StatusOutcome {
         StatusCode::NOT_MODIFIED => StatusOutcome::NotModified,
         other => StatusOutcome::Unexpected(other),
     }
+}
+
+/// 定期取得の 1 回分の結果を、失敗の記録への振る舞いに振り分ける (#245)。
+/// `ever_fetched` はそのフィードが過去に 1 度でも取得済みか
+/// (`last_fetched_at` が NULL でないか)。OPML 直後などの未取得フィードには
+/// 印を付けない。`Record` が運ぶ文字列は直近の失敗理由で 200 文字で切る。
+#[derive(Debug, PartialEq, Eq)]
+pub enum FetchFailureAction {
+    Record(String),
+    Clear,
+    Keep,
+}
+
+pub fn classify_fetch_failure(
+    outcome: &FetchAndStoreOutcome,
+    ever_fetched: bool,
+) -> FetchFailureAction {
+    match outcome {
+        FetchAndStoreOutcome::Stored(_) | FetchAndStoreOutcome::NotModified => {
+            FetchFailureAction::Clear
+        }
+        FetchAndStoreOutcome::StoreFailed(_) => FetchFailureAction::Keep,
+        FetchAndStoreOutcome::FetchFailed(e) | FetchAndStoreOutcome::Unparseable(e) => {
+            if ever_fetched {
+                FetchFailureAction::Record(truncate_reason(&format!("{e:#}")))
+            } else {
+                FetchFailureAction::Keep
+            }
+        }
+    }
+}
+
+fn truncate_reason(reason: &str) -> String {
+    reason.chars().take(200).collect()
 }
 
 /// `timeout` が `None` なら `select!` を経由せず素直に `fut` を待つ（「タイムアウト
