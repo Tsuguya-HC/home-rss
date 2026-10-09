@@ -98,7 +98,7 @@ dbmate --url "postgres://user:pass@localhost:5432/rssreader?sslmode=disable" up
 ### e2e
 
 DB に触る処理（SQL・行のデコード・応答の形）は `cargo test` では確かめられない
-（`spin_sdk::pg` は Spin の中にしか無い）。`e2e/run.sh` が server と cleaner を
+（`spin_sdk::pg` は Spin の中にしか無い）。`e2e/run.sh` が server と cleaner と fetcher を
 `spin up` で立て、実際の PostgreSQL に対して `e2e/tests` を回す。
 
 ```bash

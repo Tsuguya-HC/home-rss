@@ -12,12 +12,16 @@ use std::time::Duration;
 /// 条件付き GET のヘッダ付与・304 の扱い・パース・articles INSERT・feeds
 /// UPDATE (etag/last_modified 含む) を一箇所にまとめ、両経路の間で扱いが
 /// 乖離しないようにする (#106 R2)。
+///
+/// `Stored` が `Box` なのは clippy の `large_enum_variant` 対策 (#245:
+/// `Feed` に失敗の記録 2 列が加わって 200B を超えた。#106 時点から
+/// 値渡しだった中身は変えていない)。
 #[derive(Debug)]
 pub enum FetchAndStoreOutcome {
     /// 304 Not Modified。DB には触れていない。
     NotModified,
     /// 取得・保存に成功した。更新後の feed 行 (UPDATE ... RETURNING の結果) を返す。
-    Stored(Feed),
+    Stored(Box<Feed>),
     /// URL がスキーム/ポート/内部ホストのガードで弾かれた、到達不能・想定外
     /// ステータス・タイムアウトなど、取得自体の失敗。
     FetchFailed(anyhow::Error),
@@ -207,7 +211,7 @@ pub async fn fetch_and_store(
         )
         .await
         {
-            Ok(feed) => FetchAndStoreOutcome::Stored(feed),
+            Ok(feed) => FetchAndStoreOutcome::Stored(Box::new(feed)),
             Err(e) => FetchAndStoreOutcome::StoreFailed(e),
         },
     }
@@ -283,7 +287,8 @@ async fn store(
              last_fetched_at = NOW() WHERE id = $5 \
              RETURNING id::text, url, title, site_url, etag, last_modified, \
              EXTRACT(EPOCH FROM last_fetched_at)::bigint, \
-             EXTRACT(EPOCH FROM created_at)::bigint",
+             EXTRACT(EPOCH FROM created_at)::bigint, last_fetch_error, \
+             EXTRACT(EPOCH FROM fetch_failing_since)::bigint",
             vec![
                 parsed.title.clone().into(),
                 parsed.site_url.clone().into(),
@@ -307,7 +312,8 @@ async fn store(
 }
 
 /// `SELECT id::text, url, title, site_url, etag, last_modified, \
-///  EXTRACT(EPOCH FROM last_fetched_at)::bigint, EXTRACT(EPOCH FROM created_at)::bigint`
+///  EXTRACT(EPOCH FROM last_fetched_at)::bigint, EXTRACT(EPOCH FROM created_at)::bigint, \
+///  last_fetch_error, EXTRACT(EPOCH FROM fetch_failing_since)::bigint`
 /// の列順に対応する行デコード。取得+保存の共有処理とここ (server の一覧/追加系
 /// クエリ) の両方から使う (#106)。永続化に依存しない DTO である
 /// `shared::models` を汚さないよう、ここ (feed feature 配下) に置く (#106 R6)。
@@ -321,6 +327,8 @@ pub fn decode_feed_row(row: &Row) -> Result<Feed> {
         last_modified: Option::<String>::decode(&row[5])?,
         last_fetched_at: Option::<i64>::decode(&row[6])?,
         created_at: Option::<i64>::decode(&row[7])?,
+        last_fetch_error: Option::<String>::decode(&row[8])?,
+        fetch_failing_since: Option::<i64>::decode(&row[9])?,
     })
 }
 
