@@ -103,4 +103,9 @@ describe('fetchFailingSinceLabel', () => {
     const at = 1_757_894_400
     expect(fetchFailingSinceLabel(at)).toBe(formatDateTime(at))
   })
+
+  it('labels a missing failure start instead of leaving it blank', () => {
+    // Catches returning '' for null: the title would lose its start-time part.
+    expect(fetchFailingSinceLabel(null)).toBe('開始時刻不明')
+  })
 })

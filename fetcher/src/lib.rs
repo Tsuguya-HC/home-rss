@@ -1,13 +1,13 @@
+pub mod failure;
+
 use crate::failure::{FetchFailureAction, combine_record_error, decide_fetch_failure_action};
 use anyhow::Result;
 use home_rss_shared::db;
 use home_rss_shared::fetch::{FetchAndStoreOutcome, fetch_and_store};
-
-pub mod failure;
 use home_rss_shared::http::{Resp, text};
 use spin_sdk::http::{Request, StatusCode};
 use spin_sdk::http_service;
-use spin_sdk::pg::{Connection, Decode};
+use spin_sdk::pg::{Connection, Decode, ParameterValue};
 
 #[http_service]
 async fn handle_fetch(_req: Request) -> Resp {
@@ -82,8 +82,8 @@ async fn record_fetch_failure(conn: &Connection, feed_id: &str, reason: &str) ->
         "UPDATE feeds SET last_fetch_error = $1, \
          fetch_failing_since = COALESCE(fetch_failing_since, NOW()) WHERE id = $2",
         vec![
-            spin_sdk::pg::ParameterValue::Str(reason.to_owned()),
-            spin_sdk::pg::ParameterValue::Uuid(feed_id.to_owned()),
+            ParameterValue::Str(reason.to_owned()),
+            ParameterValue::Uuid(feed_id.to_owned()),
         ],
     )
     .await?;
@@ -94,7 +94,7 @@ async fn record_fetch_failure(conn: &Connection, feed_id: &str, reason: &str) ->
 async fn clear_fetch_failure(conn: &Connection, feed_id: &str) -> Result<()> {
     conn.execute(
         "UPDATE feeds SET last_fetch_error = NULL, fetch_failing_since = NULL WHERE id = $1",
-        vec![spin_sdk::pg::ParameterValue::Uuid(feed_id.to_owned())],
+        vec![ParameterValue::Uuid(feed_id.to_owned())],
     )
     .await?;
     Ok(())

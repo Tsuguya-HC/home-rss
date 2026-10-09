@@ -32,7 +32,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 | `POST /api/articles/read-all` | | R（全フィード） | W: 未読の全記事ぶん |
 | `POST /api/import/opml` | W: `INSERT … ON CONFLICT (url) DO NOTHING`。取得はしない | | |
 | `GET /api/stats` | R（件数） | R | R |
-| fetcher（`/fetch`） | R（`id, url, etag, last_modified` と失敗判定用の `last_fetched_at` の全行）→ フィードごとに W | W | |
+| fetcher（`/fetch`） | R（`id, url, etag, last_modified` の全行）→ フィードごとに W | W | |
 | cleaner（`/clean`） | | D（既読かつ古いもの） | 連鎖で D |
 
 即時取得と fetcher の取得は同じ `shared/src/fetch.rs` の `fetch_only()` が行い、保存は同じ `store()` を `store_fetched()` / `fetch_and_store()` 経由で呼ぶ。
@@ -104,7 +104,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 | cleaner が消した記事がまだフィードに載っている | 次に 200 が返ると UNIQUE に当たらないので、**未読の新しい行として入り直す**（304 なら入らない） |
 | cleaner / フィード削除で消えた記事を UI で開く | 既読 API が外部キー違反で 500。UI は再読み込みまで消えた記事を表示し続け、開くたびに既読 API を呼ぶ |
 | 全既読と fetcher / 即時取得 | 全既読の文より後に入った記事は未読のまま残る。UI は未読数を 0 にするので、次の読み直しまで表示とずれる |
-| OPML インポートと fetcher | インポートした行は、次の fetcher の回で初めて取得される。直後から失敗しても `last_fetched_at` が無い間は失敗の記録は付かない |
+| OPML インポートと fetcher | インポートした行は、次の fetcher の回で初めて取得される。成功歴が無くても初回の失敗から失敗の記録が付く |
 
 ## 3. 守るべき性質
 

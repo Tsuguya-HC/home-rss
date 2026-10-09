@@ -212,6 +212,20 @@ mod tests {
     }
 
     #[test]
+    fn failure_reason_keeps_the_full_error_chain() {
+        // Catches formatting with `{e}`: the context chain would shorten to just the outer message.
+        let err: anyhow::Error = anyhow::anyhow!("inner").context("outer");
+        let expected = format!("{err:#}");
+        assert!(expected.contains("inner") && expected.contains("outer"));
+        match decide_fetch_failure_action(
+            &home_rss_shared::fetch::FetchAndStoreOutcome::FetchFailed(err),
+        ) {
+            FetchFailureAction::Record { reason } => assert_eq!(reason, expected),
+            other => panic!("FetchFailed must be recorded, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn record_success_keeps_the_fetch_error() {
         // #245 item2: 記録の UPDATE が成功したときは取得側のエラーをそのまま返す。
         let err = combine_record_error(anyhow::anyhow!("HTTP 404"), Ok(()));
