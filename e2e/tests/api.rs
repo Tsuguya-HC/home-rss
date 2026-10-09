@@ -344,12 +344,7 @@ async fn fetcher_records_a_guard_rejection_as_a_fetch_failure() {
     .await
     .expect("mark feed as fetched");
 
-    let resp = reqwest::Client::new()
-        .post(format!("{}/fetch", env("E2E_FETCHER_URL")))
-        .send()
-        .await
-        .expect("POST /fetch");
-    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(post_fetch().await, 200);
 
     let row = db
         .query_one(
@@ -366,12 +361,7 @@ async fn fetcher_records_a_guard_rejection_as_a_fetch_failure() {
     assert!(!reason.is_empty());
     assert!(failing);
     // 失敗が続いても fetch_failing_since は上書きされない。もう1回叩いて同じ値のままにする。
-    let resp = reqwest::Client::new()
-        .post(format!("{}/fetch", env("E2E_FETCHER_URL")))
-        .send()
-        .await
-        .expect("POST /fetch again");
-    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(post_fetch().await, 200);
     let again: Option<String> = db
         .query_one("SELECT fetch_failing_since::text FROM feeds", &[])
         .await
