@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { FeedItem } from './FeedItem'
+import { FeedItem, fetchFailingSinceLabel } from './FeedItem'
 import { Feed } from '../types'
+import { formatDateTime } from '../lib/date'
 
 const feed: Feed = {
   id: 'f1',
@@ -92,5 +93,14 @@ describe('FeedItem', () => {
     renderItem()
 
     expect(screen.queryByText('⚠')).toBeNull()
+  })
+})
+
+describe('fetchFailingSinceLabel', () => {
+  it('formats the failure start like the article timestamps', () => {
+    // #245 item3: 警告マークの title 内時刻は、記事の日時表示と同じ
+    // formatDateTime (ja-JP 固定) と書式が揃う。
+    const at = 1_757_894_400
+    expect(fetchFailingSinceLabel(at)).toBe(formatDateTime(at))
   })
 })

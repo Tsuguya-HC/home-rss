@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { Feed } from '../types'
 
+import { formatDateTime } from '../lib/date'
+
 interface FeedItemProps {
   feed: Feed
   unreadCount: number
@@ -13,7 +15,7 @@ export function fetchFailingSinceLabel(fetchFailingSince: number | null): string
   if (fetchFailingSince == null) {
     return '開始時刻不明'
   }
-  return new Date(fetchFailingSince * 1000).toLocaleString()
+  return formatDateTime(fetchFailingSince)
 }
 
 export function FeedItem({ feed, unreadCount, isSelected, onSelect, onDelete }: FeedItemProps) {

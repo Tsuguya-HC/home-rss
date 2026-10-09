@@ -1,4 +1,4 @@
-use crate::failure::{FetchFailureAction, decide_fetch_failure_action};
+use crate::failure::{FetchFailureAction, combine_record_error, decide_fetch_failure_action};
 use anyhow::Result;
 use home_rss_shared::db;
 use home_rss_shared::fetch::{FetchAndStoreOutcome, fetch_and_store};
@@ -24,7 +24,7 @@ async fn fetch_all_feeds() -> Result<()> {
     let conn = db::connect().await?;
     let rows = conn
         .query(
-            "SELECT id::text, url, etag, last_modified, last_fetched_at IS NOT NULL FROM feeds",
+            "SELECT id::text, url, etag, last_modified FROM feeds",
             vec![],
         )
         .await?
@@ -36,17 +36,9 @@ async fn fetch_all_feeds() -> Result<()> {
         let url = String::decode(&row[1])?;
         let etag = Option::<String>::decode(&row[2])?;
         let last_modified = Option::<String>::decode(&row[3])?;
-        let ever_fetched = bool::decode(&row[4])?;
 
-        if let Err(e) = process_feed(
-            &conn,
-            &id,
-            &url,
-            etag.as_deref(),
-            last_modified.as_deref(),
-            ever_fetched,
-        )
-        .await
+        if let Err(e) =
+            process_feed(&conn, &id, &url, etag.as_deref(), last_modified.as_deref()).await
         {
             eprintln!("Failed to process feed {url}: {e:#}");
         }
@@ -68,10 +60,9 @@ async fn process_feed(
     url: &str,
     etag: Option<&str>,
     last_modified: Option<&str>,
-    ever_fetched: bool,
 ) -> Result<()> {
     let outcome = fetch_and_store(conn, feed_id, url, etag, last_modified, None).await;
-    let result = match decide_fetch_failure_action(&outcome, ever_fetched) {
+    let result = match decide_fetch_failure_action(&outcome) {
         FetchFailureAction::Keep => Ok(()),
         FetchFailureAction::Clear => clear_fetch_failure(conn, feed_id).await,
         FetchFailureAction::Record { reason } => record_fetch_failure(conn, feed_id, &reason).await,
@@ -80,7 +71,7 @@ async fn process_feed(
         FetchAndStoreOutcome::NotModified | FetchAndStoreOutcome::Stored(_) => result,
         FetchAndStoreOutcome::FetchFailed(e)
         | FetchAndStoreOutcome::Unparseable(e)
-        | FetchAndStoreOutcome::StoreFailed(e) => Err(e),
+        | FetchAndStoreOutcome::StoreFailed(e) => Err(combine_record_error(e, result)),
     }
 }
 

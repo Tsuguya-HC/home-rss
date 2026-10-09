@@ -72,7 +72,7 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 - Spin の **http trigger**（route `/fetch`、メソッドは問わない）。1 リクエストで 1 回分の取得をする
 - 誰がいつ呼ぶか、前の回が終わる前に次を呼ぶかは**リポの外で決まる**
 - 1 回分の動き: `feeds` を 1 度だけ全件読み、1 件ずつ順に `fetch_and_store()`（タイムアウト無し）。1 件の失敗はログに出して次へ進み、応答は 200。DB 接続と最初の SELECT の失敗だけが 500
-- 失敗の記録（定期取得だけ）: `FetchFailed`（送信・受信のエラー、URL ガードでの拒否、リクエストの組み立て失敗、200 / 304 以外の応答。3xx も含む）と解釈不能な本文は、一度でも取得できたフィードだけ `last_fetch_error`（直近の理由、200 文字で切る）と `fetch_failing_since`（連続失敗の始まり。失敗が続く間は上書きしない）に書く。200 と 304 は両列を NULL に戻す（304 は `last_fetched_at` を更新しない）。`StoreFailed` と即時取得（`POST /api/feeds`）は両列に触れない。一度も取得していないフィード（OPML 直後など）には印を付けない。応答しないフィードがその回で記録されないのは範囲外。判定は `fetcher/src/failure.rs` の純粋関数に切り出す
+- 失敗の記録（定期取得だけ）: `FetchFailed`（送信・受信のエラー、URL ガードでの拒否、リクエストの組み立て失敗、200 / 304 以外の応答。3xx も含む）と解釈不能な本文は、成功歴に関わらず `last_fetch_error`（直近の理由、200 文字で切る）と `fetch_failing_since`（連続失敗の始まり。失敗が続く間は上書きしない）に書く。200 と 304 は両列を NULL に戻す（304 は `last_fetched_at` を更新しない）。`StoreFailed` と即時取得（`POST /api/feeds`）は両列に触れない。記録の UPDATE 自体が失敗しても、取得側のエラーをそのまま返すのではなく両方の文面を合成して返す。応答しないフィードがその回で記録されないのは範囲外。判定は `fetcher/src/failure.rs` の純粋関数に切り出す
 - 読んだ後に追加されたフィードは、その回には取得されない
 
 ### cleaner
@@ -131,9 +131,9 @@ R = 読む、W = 書く（INSERT / UPDATE）、D = 消す。
 ### 取得と保存
 
 - 200 だけを取得成功とし、304 は変更無し、それ以外は失敗 — `shared/src/fetch.rs`: `classifies_ok_not_modified_and_unexpected`
-- 304 と `FetchFailed` / 解釈不能の失敗では記事と `last_fetched_at` に触れない（失敗の記録だけが別の UPDATE で動く。304 は記録を消し、失敗は記録を書く） — 304 での `last_fetched_at` 不変はコード目視（`process_feed` と `clear_fetch_failure` の UPDATE 文に `last_fetched_at` が無いこと）。振り分けは `fetcher/src/failure.rs`: `fetch_failed_is_recorded`, `unparseable_body_is_recorded`, `stored_feed_clears_the_record`, `not_modified_clears_the_record`, `store_failure_leaves_the_record_alone`, `failure_before_any_successful_fetch_leaves_no_mark`, `failure_reason_is_truncated_to_200_chars`。切り詰めの境界は `fetcher/src/failure.rs`: `keeps_short_reasons_untouched`, `cuts_exactly_at_the_character_limit`, `never_splits_a_multibyte_character`。保存の失敗と即時取得が記録に触れないことはコード目視と e2e: `readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged`
+- 304 と `FetchFailed` / 解釈不能の失敗では記事と `last_fetched_at` に触れない（失敗の記録だけが別の UPDATE で動く。304 は記録を消し、失敗は記録を書く） — 304 での `last_fetched_at` 不変はコード目視（`process_feed` と `clear_fetch_failure` の UPDATE 文に `last_fetched_at` が無いこと）。振り分けは `fetcher/src/failure.rs`: `fetch_failed_is_recorded`, `unparseable_body_is_recorded`, `stored_feed_clears_the_record`, `not_modified_clears_the_record`, `store_failure_leaves_the_record_alone`, `failure_without_any_prior_success_is_recorded`, `failure_reason_is_truncated_to_200_chars`。記録の UPDATE の失敗が返り値に残ることは `fetcher/src/failure.rs`: `record_success_keeps_the_fetch_error`, `record_failure_is_visible_alongside_the_fetch_error`。切り詰めの境界は `fetcher/src/failure.rs`: `keeps_short_reasons_untouched`, `cuts_exactly_at_the_character_limit`, `never_splits_a_multibyte_character`。保存の失敗と即時取得が記録に触れないことはコード目視と e2e: `readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged`
 - 既存の記事は上書きしない。同じフィード・同じ URL の記事は 1 行だけ — テスト無し
-- 定期取得の失敗は `feeds` に記録され、成功で消える — e2e: `fetcher_records_a_guard_rejection_as_a_fetch_failure`（失敗の記録と `fetch_failing_since` の不変）、e2e: `feed_list_exposes_the_fetch_failure_record`（JSON への露出）。理由の文面と 200 文字制限は `fetcher/src/failure.rs`: `fetch_failed_is_recorded`, `failure_reason_is_truncated_to_200_chars`
+- 定期取得の失敗は `feeds` に記録され、成功で消える — e2e: `fetcher_records_a_guard_rejection_as_a_fetch_failure`（失敗の記録と `fetch_failing_since` の不変）、e2e: `fetcher_records_a_never_fetched_feed_on_its_first_fetch`（成功歴の無い行の初回記録）、e2e: `fetcher_eventually_marks_a_never_fetched_feed_that_keeps_failing`（恒常的な失敗の記録）、e2e: `feed_list_exposes_the_fetch_failure_record`（JSON への露出）。理由の文面と 200 文字制限は `fetcher/src/failure.rs`: `fetch_failed_is_recorded`, `failure_reason_is_truncated_to_200_chars`
 - 失敗中のフィードはサイドバーの名前の横に警告マーク（⚠。削除確認の `!` とは別）を出し、title に理由と失敗し始めた時刻（ローカル時刻）を入れる — `ui/src/components/FeedItem.test.tsx`: `shows a warning for a failing feed`, `shows no warning for a healthy feed`（時刻の値そのものはブラウザでの目視）
 - 1 フィードの失敗で fetcher の他のフィードを止めない — テスト無し
 - パースできない本文はエラーにする — `shared/src/feed.rs`: `unparseable_body_is_an_error`

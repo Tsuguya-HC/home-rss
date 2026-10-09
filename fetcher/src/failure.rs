@@ -27,23 +27,34 @@ pub fn truncate_reason(reason: &str) -> String {
     }
 }
 
-pub fn decide_fetch_failure_action(
-    outcome: &FetchAndStoreOutcome,
-    ever_fetched: bool,
-) -> FetchFailureAction {
+pub fn decide_fetch_failure_action(outcome: &FetchAndStoreOutcome) -> FetchFailureAction {
     match outcome {
         FetchAndStoreOutcome::Stored(_) | FetchAndStoreOutcome::NotModified => {
             FetchFailureAction::Clear
         }
         FetchAndStoreOutcome::StoreFailed(_) => FetchFailureAction::Keep,
         FetchAndStoreOutcome::FetchFailed(e) | FetchAndStoreOutcome::Unparseable(e) => {
-            // OPML から入れた直後など、一度も取得していないフィードには印を付けない。
-            if !ever_fetched {
-                return FetchFailureAction::Keep;
-            }
+            // 成功歴 (`last_fetched_at IS NOT NULL`) で初回失敗を猶予する案は採らない:
+            // 一度も成功しないフィードはその列が永久に NULL のままなので、
+            // 恒常的な失敗に警告が一生付かなくなる (#245 item1)。
             FetchFailureAction::Record {
                 reason: truncate_reason(&format!("{e:#}")),
             }
+        }
+    }
+}
+
+/// 取得自体の失敗と、その失敗を記録する UPDATE の成否を 1 つのエラーに束ねる
+/// (#245 item2)。記録の UPDATE が失敗しても取得側のエラーだけ返すと、
+/// 記録の失敗がログにも返り値にも現れず消える。両方あるときは両方の文面を残す。
+pub fn combine_record_error(
+    fetch_error: anyhow::Error,
+    record_result: anyhow::Result<()>,
+) -> anyhow::Error {
+    match record_result {
+        Ok(()) => fetch_error,
+        Err(record_error) => {
+            anyhow::anyhow!("{record_error:#} (while recording failure: {fetch_error:#})")
         }
     }
 }
@@ -81,7 +92,7 @@ mod tests {
         assert!(cut.is_char_boundary(cut.len()));
     }
 
-    use super::decide_fetch_failure_action;
+    use super::{combine_record_error, decide_fetch_failure_action};
     use crate::failure::FetchFailureAction;
     use home_rss_shared::models::Feed;
 
@@ -110,7 +121,7 @@ mod tests {
     fn fetch_failed_is_recorded() {
         // 送信・受信のエラー、URL ガードでの拒否、想定外ステータスは
         // どれも FetchFailed に正規化されるので、ここでは記録することだけを固定する。
-        match decide_fetch_failure_action(&failed_outcome(), true) {
+        match decide_fetch_failure_action(&failed_outcome()) {
             FetchFailureAction::Record { reason } => {
                 assert!(!reason.is_empty());
                 assert!(reason.chars().count() <= 200);
@@ -125,7 +136,6 @@ mod tests {
             &home_rss_shared::fetch::FetchAndStoreOutcome::Unparseable(anyhow::anyhow!(
                 "feed at https://example.com/feed could not be parsed"
             )),
-            true,
         ) {
             FetchFailureAction::Record { .. } => {}
             other => panic!("Unparseable must be recorded, got {other:?}"),
@@ -135,10 +145,9 @@ mod tests {
     #[test]
     fn stored_feed_clears_the_record() {
         assert_eq!(
-            decide_fetch_failure_action(
-                &home_rss_shared::fetch::FetchAndStoreOutcome::Stored(Box::new(stored_feed())),
-                true
-            ),
+            decide_fetch_failure_action(&home_rss_shared::fetch::FetchAndStoreOutcome::Stored(
+                Box::new(stored_feed())
+            ),),
             FetchFailureAction::Clear
         );
     }
@@ -146,10 +155,7 @@ mod tests {
     #[test]
     fn not_modified_clears_the_record() {
         assert_eq!(
-            decide_fetch_failure_action(
-                &home_rss_shared::fetch::FetchAndStoreOutcome::NotModified,
-                true
-            ),
+            decide_fetch_failure_action(&home_rss_shared::fetch::FetchAndStoreOutcome::NotModified,),
             FetchFailureAction::Clear
         );
     }
@@ -158,32 +164,32 @@ mod tests {
     fn store_failure_leaves_the_record_alone() {
         // DB への保存の失敗は失敗の記録を変えない。残っていれば残すし、
         // 無ければ作らない (#245)。
-        for ever_fetched in [true, false] {
-            assert_eq!(
-                decide_fetch_failure_action(
-                    &home_rss_shared::fetch::FetchAndStoreOutcome::StoreFailed(anyhow::anyhow!(
-                        "db is down"
-                    )),
-                    ever_fetched,
-                ),
-                FetchFailureAction::Keep,
-                "ever_fetched = {ever_fetched}"
-            );
-        }
+        assert_eq!(
+            decide_fetch_failure_action(
+                &home_rss_shared::fetch::FetchAndStoreOutcome::StoreFailed(anyhow::anyhow!(
+                    "db is down"
+                )),
+            ),
+            FetchFailureAction::Keep,
+        );
     }
 
     #[test]
-    fn failure_before_any_successful_fetch_leaves_no_mark() {
-        // OPML から入れた直後など、一度も取得していないフィードには印を付けない。
+    fn failure_without_any_prior_success_is_recorded() {
+        // #245 item1: OPML 直後など一度も成功したことがないフィードでも、
+        // 取得の失敗は記録する。成功歴で初回失敗を猶予すると、恒常的な
+        // 失敗に警告が一生付かなくなる。
         for outcome in [
             failed_outcome(),
             home_rss_shared::fetch::FetchAndStoreOutcome::Unparseable(anyhow::anyhow!(
                 "not a feed"
             )),
         ] {
-            assert_eq!(
-                decide_fetch_failure_action(&outcome, false),
-                FetchFailureAction::Keep,
+            assert!(
+                matches!(
+                    decide_fetch_failure_action(&outcome),
+                    FetchFailureAction::Record { .. }
+                ),
                 "got {outcome:?}"
             );
         }
@@ -197,12 +203,31 @@ mod tests {
         );
         match decide_fetch_failure_action(
             &home_rss_shared::fetch::FetchAndStoreOutcome::FetchFailed(anyhow::anyhow!(long)),
-            true,
         ) {
             FetchFailureAction::Record { reason } => {
                 assert_eq!(reason.chars().count(), 200);
             }
             other => panic!("FetchFailed must be recorded, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn record_success_keeps_the_fetch_error() {
+        // #245 item2: 記録の UPDATE が成功したときは取得側のエラーをそのまま返す。
+        let err = combine_record_error(anyhow::anyhow!("HTTP 404"), Ok(()));
+        assert_eq!(format!("{err:#}"), "HTTP 404");
+    }
+
+    #[test]
+    fn record_failure_is_visible_alongside_the_fetch_error() {
+        // #245 item2: 記録の UPDATE 自体が失敗しても、取得側のエラーだけ返して
+        // 握り潰さない。両方の文面が返り値に残る。
+        let err = combine_record_error(
+            anyhow::anyhow!("HTTP 404"),
+            Err(anyhow::anyhow!("db is down")),
+        );
+        let text = format!("{err:#}");
+        assert!(text.contains("db is down"), "record error lost: {text}");
+        assert!(text.contains("HTTP 404"), "fetch error lost: {text}");
     }
 }

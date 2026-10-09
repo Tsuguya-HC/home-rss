@@ -98,6 +98,16 @@ async fn delete(path: &str) -> u16 {
         .as_u16()
 }
 
+async fn post_fetch() -> u16 {
+    reqwest::Client::new()
+        .post(format!("{}/fetch", env("E2E_FETCHER_URL")))
+        .send()
+        .await
+        .expect("POST /fetch")
+        .status()
+        .as_u16()
+}
+
 fn titles(articles: &Value) -> Vec<&str> {
     let mut titles: Vec<&str> = articles
         .as_array()
@@ -324,8 +334,9 @@ async fn fetcher_records_a_guard_rejection_as_a_fetch_failure() {
     // 外部へは出ない。未実装では last_fetch_error 列自体が無く落ちる。
     let db = fresh_db().await;
     let feed = seed_feed(&db, "https://localhost/feed").await;
-    // ガード拒否が記録されるのは「一度は取得できた」フィードだけ
-    // (OPML 直後の未取得は印を付けない)。一度取得したことにする。
+    // 成功歴のある行でも記録されることの確認用に、一度取得したことにする
+    // （成功歴の無い行の記録は `fetcher_records_a_never_fetched_feed_on_its_first_fetch`
+    // が別に固定する）。
     db.execute(
         "UPDATE feeds SET last_fetched_at = now() WHERE id = $1::text::uuid",
         &[&feed],
@@ -367,6 +378,74 @@ async fn fetcher_records_a_guard_rejection_as_a_fetch_failure() {
         .expect("read failure record again")
         .get(0);
     assert_eq!(again, since);
+}
+
+#[tokio::test]
+async fn fetcher_records_a_never_fetched_feed_on_its_first_fetch() {
+    // #245 item4: OPML 直後など、一度も成功したことがない行でも、取得の
+    // 試みが失敗すればその 1 回目から失敗列が書かれることを固定する。
+    // 試み自体がまだ無い行（次の cron tick 前）は NULL のまま。
+    let db = fresh_db().await;
+    seed_feed(&db, "https://localhost/feed").await;
+
+    let before: Option<String> = db
+        .query_one("SELECT last_fetch_error FROM feeds", &[])
+        .await
+        .expect("read failure record before any fetch")
+        .get(0);
+    assert_eq!(before, None);
+
+    assert_eq!(post_fetch().await, 200);
+
+    let row = db
+        .query_one(
+            "SELECT last_fetch_error, fetch_failing_since IS NOT NULL AS failing FROM feeds",
+            &[],
+        )
+        .await
+        .expect("read failure record");
+    let reason: Option<String> = row.get(0);
+    let failing: bool = row.get(1);
+    let reason = reason.expect("a failing first fetch must be recorded");
+    assert!(!reason.is_empty());
+    assert!(failing);
+}
+
+#[tokio::test]
+async fn fetcher_eventually_marks_a_never_fetched_feed_that_keeps_failing() {
+    // #245 item1 (HIGH): OPML 直後など、一度も取得に成功したことがない
+    // フィード（last_fetched_at が NULL のまま）が恒常的に失敗し続けたら、
+    // last_fetch_error / fetch_failing_since が書かれる。初回から記録する
+    // 直しでは 1 回でも書かれる。
+    let db = fresh_db().await;
+    seed_feed(&db, "https://localhost/feed").await;
+
+    // まだ 1 回も process_feed が呼ばれていない行には印が付かない。
+    let before: Option<String> = db
+        .query_one("SELECT last_fetch_error FROM feeds", &[])
+        .await
+        .expect("read failure record before any fetch")
+        .get(0);
+    assert_eq!(before, None);
+
+    // https://localhost/feed は SSRF ガードに弾かれるので外部へは出ない。
+    // 閾値を決めないため多めに繰り返す。
+    for _ in 0..10 {
+        assert_eq!(post_fetch().await, 200);
+    }
+
+    let row = db
+        .query_one(
+            "SELECT last_fetch_error, fetch_failing_since IS NOT NULL AS failing FROM feeds",
+            &[],
+        )
+        .await
+        .expect("read failure record");
+    let reason: Option<String> = row.get(0);
+    let failing: bool = row.get(1);
+    let reason = reason.expect("a permanently failing feed must eventually be recorded");
+    assert!(!reason.is_empty());
+    assert!(failing);
 }
 
 #[tokio::test]
