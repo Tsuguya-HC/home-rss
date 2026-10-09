@@ -13,15 +13,25 @@ const feed: Feed = {
   last_modified: null,
   last_fetched_at: null,
   created_at: null,
+  last_fetch_error: null,
+  fetch_failing_since: null,
 }
 
+const failingFeed: Feed = {
+  ...feed,
+  id: 'f2',
+  last_fetch_error: 'HTTP 404',
+  fetch_failing_since: 1_757_894_400,
+} as Feed
+
 function renderItem(
+  item: Feed = feed,
   onDelete = vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
   onSelect = vi.fn<() => void>(),
 ) {
   render(
     <FeedItem
-      feed={feed}
+      feed={item}
       unreadCount={0}
       isSelected={false}
       onSelect={onSelect}
@@ -58,5 +68,29 @@ describe('FeedItem', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('shows a warning for a failing feed', () => {
+    // #245: 失敗中のフィードだけ警告マーク（⚠）を出す。削除確認の `!` とは別物。
+    // title には理由を入れる。
+    renderItem(failingFeed)
+
+    expect(screen.getByText('⚠')).toBeTruthy()
+    expect(screen.getByTitle(/HTTP 404/)).toBeTruthy()
+  })
+
+  it('shows a warning without a start time when the record has no timestamp', () => {
+    // fetch_failing_since が NULL でもマークと理由は出す。DB の列は NULL 可なので、
+    // 直書きされた行で時刻が無い場合も壊さず表示する。
+    renderItem({ ...failingFeed, fetch_failing_since: null })
+
+    expect(screen.getByText('⚠')).toBeTruthy()
+    expect(screen.getByTitle(/HTTP 404/)).toBeTruthy()
+  })
+
+  it('shows no warning for a healthy feed', () => {
+    renderItem()
+
+    expect(screen.queryByText('⚠')).toBeNull()
   })
 })

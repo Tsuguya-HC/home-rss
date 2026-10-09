@@ -318,6 +318,80 @@ async fn readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged() {
 }
 
 #[tokio::test]
+async fn fetcher_records_a_guard_rejection_as_a_fetch_failure() {
+    // #245: fetcher の定期取得で URL ガードに弾かれたフィードは、失敗として
+    // feeds に記録される。https://localhost/feed は SSRF ガードに弾かれるので
+    // 外部へは出ない。未実装では last_fetch_error 列自体が無く落ちる。
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://localhost/feed").await;
+    // ガード拒否が記録されるのは「一度は取得できた」フィードだけ
+    // (OPML 直後の未取得は印を付けない)。一度取得したことにする。
+    db.execute(
+        "UPDATE feeds SET last_fetched_at = now() WHERE id = $1::text::uuid",
+        &[&feed],
+    )
+    .await
+    .expect("mark feed as fetched");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/fetch", env("E2E_FETCHER_URL")))
+        .send()
+        .await
+        .expect("POST /fetch");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let row = db
+        .query_one(
+            "SELECT last_fetch_error, fetch_failing_since IS NOT NULL AS failing, \
+             fetch_failing_since::text FROM feeds",
+            &[],
+        )
+        .await
+        .expect("read failure record");
+    let reason: Option<String> = row.get(0);
+    let failing: bool = row.get(1);
+    let since: Option<String> = row.get(2);
+    let reason = reason.expect("a guard rejection must be recorded");
+    assert!(!reason.is_empty());
+    assert!(failing);
+    // 失敗が続いても fetch_failing_since は上書きされない。もう1回叩いて同じ値のままにする。
+    let resp = reqwest::Client::new()
+        .post(format!("{}/fetch", env("E2E_FETCHER_URL")))
+        .send()
+        .await
+        .expect("POST /fetch again");
+    assert_eq!(resp.status().as_u16(), 200);
+    let again: Option<String> = db
+        .query_one("SELECT fetch_failing_since::text FROM feeds", &[])
+        .await
+        .expect("read failure record again")
+        .get(0);
+    assert_eq!(again, since);
+}
+
+#[tokio::test]
+async fn feed_list_exposes_the_fetch_failure_record() {
+    // #245: DB に直接入れた失敗の記録が GET /api/feeds に出る。未実装では
+    // 列が無く INSERT で落ちる。
+    let db = fresh_db().await;
+    let feed = seed_feed(&db, "https://a.example/feed").await;
+    db.execute(
+        "UPDATE feeds SET last_fetch_error = $1, fetch_failing_since = now() \
+         WHERE id = $2::text::uuid",
+        &[&"HTTP 404", &feed],
+    )
+    .await
+    .expect("seed failure record");
+
+    let (status, body) = get_json("/api/feeds").await;
+    assert_eq!(status, 200);
+    let feeds = body.as_array().expect("array of feeds");
+    assert_eq!(feeds.len(), 1);
+    assert_eq!(feeds[0]["last_fetch_error"], "HTTP 404");
+    assert!(feeds[0]["fetch_failing_since"].is_number());
+}
+
+#[tokio::test]
 async fn cleaner_deletes_only_read_articles_past_retention() {
     let db = fresh_db().await;
     let feed = seed_feed(&db, "https://a.example/feed").await;
