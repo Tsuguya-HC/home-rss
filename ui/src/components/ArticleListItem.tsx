@@ -20,7 +20,7 @@ export function ArticleListItem({ article, isSelected, onClick }: ArticleListIte
 
   return (
     <li
-      className={`article-item${isSelected ? ' article-item--active' : ''}${article.image_url ? ' article-item--with-thumbnail' : ''}`}
+      className={`article-item${isSelected ? ' article-item--active' : ''}${imageUrl ? ' article-item--with-thumbnail' : ''}`}
       onClick={onClick}
     >
       <div className="article-item-body">
