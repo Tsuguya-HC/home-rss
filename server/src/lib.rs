@@ -166,7 +166,7 @@ async fn add_feed(req: Request) -> Result<Resp> {
     // fetcher・DELETE・同時追加を最大約30〜60秒ブロックする（差し戻し）。
     // 取得の失敗ではトランザクション自体を始めず、新規行も残さない。
     // 既存か新規かは行の有無ではなく `xmax = 0`（= 挿入された行）で見分ける。
-    // INSERT への変更は `readding_an_existing_feed_that_fails_to_fetch` の
+    // INSERT への変更は `readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged` の
     // 変異検出の当て先なので、文面を変えるときはその変異の当て直しも要る。
     let fetched = immediate_prefetch(&url).await;
     let url_text = url.to_string();
@@ -669,7 +669,7 @@ mod tests {
             &ImmediateFetchOutcome::Fetched(test_feed())
         ));
         // 新規行の失敗は残骸になるので取り消す。既存行の失敗は前からある
-        // 行なので残す（e2e の `readding_an_existing_feed_that_fails_to_fetch`
+        // 行なので残す（e2e の `readding_an_existing_feed_that_fails_to_fetch_keeps_it_unchanged`
         // が守る振る舞いと同じ。反転するとその e2e が落ちる）。
         for outcome in [
             ImmediateFetchOutcome::FetchFailed,
