@@ -15,14 +15,19 @@ rss.infra.tgy.io → oauth2-proxy → server (http trigger) ─── API ──
 ```
 
 **server と fetcher の両方が外部フィードを取りに行く。** フィード追加 (`POST /api/feeds`) は
-その場で 1 回取得し、以降は fetcher が定期取得する。取得+保存の実体は
-`shared/src/fetch.rs` の `fetch_and_store()` ひとつで、違いはタイムアウトの有無だけ
-（server は有界、fetcher は打ち切りなし）。**二重実装にしないこと** — 分かれていた頃は
+その場で 1 回取得し、以降は fetcher が定期取得する。取得の実体は `shared/src/fetch.rs` の
+`fetch_only()`、保存の実体は同じファイルの `store()` で、どちらもひとつ。fetcher は両方を束ねた
+`fetch_and_store()` を呼ぶ。server の `add_feed` は外部への取得を PostgreSQL のトランザクションの
+外に出すため、`fetch_only()` で取得してから、トランザクションの中で `store_fetched()`（`store()` を
+呼ぶだけ）で保存する（#148）。違いはタイムアウトの有無（server は有界、fetcher は打ち切りなし）と、
+server が条件付き GET にしないことだけ。**二重実装にしないこと** — 分かれていた頃は
 ETag / Last-Modified の扱いが既に乖離していた。
 
 ユーザーが指定した URL をサーバーが取りに行くので、`shared/src/ssrf.rs` の
-`reject_internal_feed_url()` が `fetch_and_store()` の入口で内部宛を弾く（追加時の 1 回だけでなく
-**定期取得のたびに効く**）。ネットワーク層の境界は
+`reject_internal_feed_url()` が内部宛を弾く。fetcher には `fetch_and_store()` の入口で効き
+（追加時の 1 回だけでなく**定期取得のたびに効く**）、server では `add_feed` が取得の前に呼んで
+正規化後の URL を `fetch_only()` に渡す。`fetch_only()` / `store_fetched()` 自体は検査しないので、
+これらを直接呼ぶ経路は自分でガードを通すこと。ネットワーク層の境界は
 [docs/network-access.md](docs/network-access.md) を参照。
 
 | サービス | trigger | 役割 | K8s リソース | OCI イメージ |
@@ -207,7 +212,7 @@ doc コメント（`///`）も同じ。
   `allowed_outbound_hosts` に `http://*:80` を戻しても、home-cluster の CNP が world:443 しか
   開けていないので平文フィードは失敗ではなくハングする。開けるなら両方を揃えて直すこと。
   外部アクセスの全体像と、新しい宛先が要るときの手順は [docs/network-access.md](docs/network-access.md)
-- **`shared` の `feed` feature** が feed パース（feed-rs / url）と `fetch_and_store` を囲う。
+- **`shared` の `feed` feature** が feed パース（feed-rs / url）と取得+保存（`fetch_only` / `store_fetched` / `fetch_and_store`）を囲う。
   有効化するのは server / fetcher だけで、cleaner は引き込まない。ただし
   `cargo test --workspace` は feature unification で全部に効くので、**単体ビルド
   (`cargo build -p ...`) でしか差は出ない**（`shared/Cargo.toml` に実測メモ）
