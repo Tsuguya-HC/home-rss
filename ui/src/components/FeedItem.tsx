@@ -1,12 +1,21 @@
 import { useState } from 'react'
 import { Feed } from '../types'
 
+import { formatDateTime } from '../lib/date'
+
 interface FeedItemProps {
   feed: Feed
   unreadCount: number
   isSelected: boolean
   onSelect: () => void
   onDelete: () => Promise<void>
+}
+
+export function fetchFailingSinceLabel(fetchFailingSince: number | null): string {
+  if (fetchFailingSince == null) {
+    return '開始時刻不明'
+  }
+  return formatDateTime(fetchFailingSince)
 }
 
 export function FeedItem({ feed, unreadCount, isSelected, onSelect, onDelete }: FeedItemProps) {
@@ -24,7 +33,17 @@ export function FeedItem({ feed, unreadCount, isSelected, onSelect, onDelete }: 
 
   return (
     <div className={`feed-item${isSelected ? ' feed-item--active' : ''}`} onClick={onSelect}>
-      <span className="feed-name">{feed.title || feed.url}</span>
+      <span className="feed-name">
+        {feed.title || feed.url}
+        {feed.last_fetch_error && (
+          <span
+            className="fetch-failure-mark"
+            title={`${feed.last_fetch_error} (${fetchFailingSinceLabel(feed.fetch_failing_since)})`}
+          >
+            ⚠
+          </span>
+        )}
+      </span>
       <span className="feed-actions">
         {unreadCount > 0 && <span className="unread-badge">{unreadCount}</span>}
         <button

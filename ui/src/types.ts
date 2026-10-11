@@ -7,6 +7,8 @@ export interface Feed {
   last_modified: string | null
   last_fetched_at: number | null
   created_at: number | null
+  last_fetch_error: string | null
+  fetch_failing_since: number | null
 }
 
 export interface Article {
