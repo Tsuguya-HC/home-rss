@@ -1086,3 +1086,346 @@ fn command_exit_status_tells_findings_from_none_and_errors() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8(out.stderr).unwrap().starts_with("usage:"));
 }
+
+// ---- scripts/diff-coverage.sh ----
+
+// The coverage tools are replaced by stubs that log their arguments and write
+// the lcov the test gives them; `cargo run` of the report goes to the real
+// binary.
+const STUB_CARGO: &str = r#"#!/usr/bin/env bash
+set -euo pipefail
+{ printf '%s\037' cargo "$PWD" "$@"; printf '\n'; } >> "$STUB_LOG"
+case "$1" in
+  llvm-cov)
+    [ "${STUB_FAIL:-}" != llvm-cov ] || exit 101
+    out= prev=
+    for a in "$@"; do
+      [ "$prev" != --output-path ] || out=$a
+      prev=$a
+    done
+    cp "$STUB_RUST_LCOV" "$out"
+    ;;
+  build) ;;
+  run)
+    [ "${STUB_FAIL:-}" != run ] || exit 101
+    while [ "$1" != -- ]; do shift; done
+    shift
+    exec "$STUB_DIFF_COVERAGE" "$@"
+    ;;
+  *) exit 99 ;;
+esac
+"#;
+
+const STUB_PNPM: &str = r#"#!/usr/bin/env bash
+set -euo pipefail
+{ printf '%s\037' pnpm "$PWD" "$@"; printf '\n'; } >> "$STUB_LOG"
+case "$1" in
+  install) ;;
+  exec)
+    [ "${STUB_FAIL:-}" != vitest ] || exit 1
+    dir=
+    for a in "$@"; do
+      case "$a" in --coverage.reportsDirectory=*) dir=${a#*=} ;; esac
+    done
+    mkdir -p "$dir"
+    cp "$STUB_UI_LCOV" "$dir/lcov.info"
+    ;;
+  *) exit 99 ;;
+esac
+"#;
+
+const BASE_LIB: &str = "pub fn a() -> u8 {\n    1\n}\n";
+const CHANGED_LIB: &str = "pub fn a() -> u8 {\n    1\n}\npub fn b() -> u8 {\n    2\n}\n";
+
+struct ScriptRun {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    /// One entry per stub call: the tool, its working directory, its arguments.
+    calls: Vec<Vec<String>>,
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// A repository holding the real script whose first commit is the base; the
+/// caller changes it from there.
+fn script_fixture(name: &str) -> (Fixture, PathBuf, String) {
+    let f = Fixture::new(&format!("script-{name}"));
+    let repo = f.dir.join("repo");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/diff-coverage.sh");
+    f.write(
+        "repo/scripts/diff-coverage.sh",
+        &std::fs::read_to_string(script).unwrap(),
+    );
+    f.write("repo/src/lib.rs", BASE_LIB);
+    f.write("repo/ui/package.json", "{}\n");
+    for (stub, body) in [("cargo", STUB_CARGO), ("pnpm", STUB_PNPM)] {
+        let p = f.write(&format!("bin/{stub}"), body);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    (f, repo, base)
+}
+
+fn run_script(f: &Fixture, args: &[&str], rust_lcov: &str, fail: &str) -> ScriptRun {
+    let rust = f.write("stub-rust.lcov", rust_lcov);
+    let ui = f.write("stub-ui.lcov", "");
+    let log = f.dir.join("calls.log");
+    let _ = std::fs::remove_file(&log);
+    let path = format!(
+        "{}:{}",
+        f.dir.join("bin").display(),
+        std::env::var("PATH").unwrap()
+    );
+    let out = Command::new("bash")
+        .arg("scripts/diff-coverage.sh")
+        .args(args)
+        .current_dir(f.dir.join("repo"))
+        .env("PATH", path)
+        .env("STUB_LOG", &log)
+        .env("STUB_RUST_LCOV", rust)
+        .env("STUB_UI_LCOV", ui)
+        .env("STUB_DIFF_COVERAGE", env!("CARGO_BIN_EXE_diff-coverage"))
+        .env("STUB_FAIL", fail)
+        .output()
+        .unwrap();
+    let calls = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| {
+            l.strip_suffix('\x1f')
+                .unwrap()
+                .split('\x1f')
+                .map(str::to_owned)
+                .collect()
+        })
+        .collect();
+    ScriptRun {
+        code: out.status.code(),
+        stdout: String::from_utf8(out.stdout).unwrap(),
+        stderr: String::from_utf8(out.stderr).unwrap(),
+        calls,
+    }
+}
+
+fn host_target() -> String {
+    let out = Command::new("rustc").arg("-vV").output().unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .find_map(|l| l.strip_prefix("host: ").map(str::to_owned))
+        .unwrap()
+}
+
+// Both functions of the changed lib.rs run.
+const ALL_RUN: &str =
+    "SF:src/lib.rs\nDA:1,1\nDA:2,1\nDA:3,1\nDA:4,1\nDA:5,1\nDA:6,1\nend_of_record\n";
+
+#[test]
+fn script_runs_the_coverage_tools_with_the_flags_the_report_reads() {
+    let (f, repo, base) = script_fixture("calls");
+    f.write("repo/src/lib.rs", CHANGED_LIB);
+
+    let got = run_script(&f, &[&base], ALL_RUN, "");
+    assert_eq!(got.code, Some(0), "{}", got.stderr);
+
+    // The temporary directory is named by mktemp; take it from the first call.
+    let output_path = got.calls[0].last().unwrap().clone();
+    let work = output_path.strip_suffix("/rust.lcov").unwrap();
+    let calls: Vec<Vec<String>> = got
+        .calls
+        .iter()
+        .map(|c| {
+            c.iter()
+                .map(|a| {
+                    a.replace(work, "{work}")
+                        .replace(&repo.display().to_string(), "{repo}")
+                })
+                .collect()
+        })
+        .collect();
+    let host = host_target();
+    let expected: Vec<Vec<&str>> = vec![
+        vec![
+            "cargo",
+            "{repo}",
+            "llvm-cov",
+            "--workspace",
+            "--target",
+            &host,
+            "--lcov",
+            "--output-path",
+            "{work}/rust.lcov",
+        ],
+        vec!["pnpm", "{repo}/ui", "install", "--frozen-lockfile"],
+        vec![
+            "pnpm",
+            "{repo}/ui",
+            "exec",
+            "vitest",
+            "run",
+            "--coverage.enabled",
+            "--coverage.reporter=lcov",
+            "--coverage.reportsDirectory={work}/ui-coverage",
+        ],
+        vec![
+            "cargo",
+            "{repo}",
+            "build",
+            "-q",
+            "-p",
+            "home-rss-repo-checks",
+            "--target",
+            &host,
+            "--bin",
+            "diff-coverage",
+        ],
+        vec![
+            "cargo",
+            "{repo}",
+            "run",
+            "-q",
+            "-p",
+            "home-rss-repo-checks",
+            "--target",
+            &host,
+            "--bin",
+            "diff-coverage",
+            "--",
+            ".",
+            "{work}/diff",
+            "{work}/rust.lcov",
+            "{work}/ui-coverage/lcov.info",
+        ],
+    ];
+    assert_eq!(calls, expected);
+    assert!(
+        !Path::new(work).exists(),
+        "the temporary directory is left behind"
+    );
+}
+
+#[test]
+fn script_prints_the_changed_lines_no_test_runs_and_exits_1() {
+    let (f, _repo, base) = script_fixture("findings");
+    f.write("repo/src/lib.rs", CHANGED_LIB);
+
+    let got = run_script(
+        &f,
+        &[&base],
+        "SF:src/lib.rs\nDA:1,1\nDA:2,1\nDA:3,1\nDA:4,1\nDA:5,0\nDA:6,1\nend_of_record\n",
+        "",
+    );
+
+    assert_eq!(got.code, Some(1), "{}", got.stderr);
+    assert_eq!(got.stdout, "src/lib.rs:5\tuntested\n");
+}
+
+#[test]
+fn script_counts_an_untracked_file_as_wholly_new() {
+    let (f, _repo, base) = script_fixture("untracked");
+    f.write("repo/src/new.rs", "pub fn c() -> u8 {\n    3\n}\n");
+
+    let got = run_script(
+        &f,
+        &[&base],
+        "SF:src/lib.rs\nDA:1,1\nDA:2,1\nDA:3,1\nend_of_record\n\
+         SF:src/new.rs\nDA:1,1\nDA:2,0\nDA:3,1\nend_of_record\n",
+        "",
+    );
+
+    assert_eq!(got.code, Some(1), "{}", got.stderr);
+    assert_eq!(got.stdout, "src/new.rs:2\tuntested\n");
+}
+
+#[test]
+fn script_leaves_out_what_the_base_changed_after_the_fork() {
+    let (f, repo, _base) = script_fixture("fork");
+    f.write("repo/src/old.rs", "pub fn o() -> u8 {\n    0\n}\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "old.rs"]);
+    git(&repo, &["checkout", "-q", "-b", "topic"]);
+    f.write("repo/src/lib.rs", CHANGED_LIB);
+    git(&repo, &["commit", "-q", "-am", "topic"]);
+    git(&repo, &["checkout", "-q", "main"]);
+    git(&repo, &["rm", "-q", "src/old.rs"]);
+    git(&repo, &["commit", "-q", "-m", "main drops old.rs"]);
+    git(&repo, &["checkout", "-q", "topic"]);
+
+    // Compared with main itself, topic would add old.rs back, line 2 unrun.
+    let got = run_script(
+        &f,
+        &["main"],
+        "SF:src/lib.rs\nDA:1,1\nDA:2,1\nDA:3,1\nDA:4,1\nDA:5,0\nDA:6,1\nend_of_record\n\
+         SF:src/old.rs\nDA:1,1\nDA:2,0\nDA:3,1\nend_of_record\n",
+        "",
+    );
+
+    assert_eq!(got.code, Some(1), "{}", got.stderr);
+    assert_eq!(got.stdout, "src/lib.rs:5\tuntested\n");
+}
+
+#[test]
+fn script_exits_2_without_a_report_when_a_tool_fails() {
+    for tool in ["llvm-cov", "vitest"] {
+        let (f, _repo, base) = script_fixture(&format!("fail-{tool}"));
+        f.write("repo/src/lib.rs", CHANGED_LIB);
+
+        let got = run_script(&f, &[&base], ALL_RUN, tool);
+
+        assert_eq!(got.code, Some(2), "{tool}: {}", got.stderr);
+        assert_eq!(got.stdout, "", "{tool}");
+        assert!(
+            !got.calls
+                .iter()
+                .any(|c| c.get(2).is_some_and(|a| a == "run")),
+            "{tool}: the report ran after the failure"
+        );
+    }
+}
+
+#[test]
+fn script_exits_2_when_the_report_cannot_run() {
+    let (f, _repo, base) = script_fixture("fail-run");
+    f.write("repo/src/lib.rs", CHANGED_LIB);
+
+    // cargo exits 101 when the report fails to build or start.
+    let got = run_script(&f, &[&base], ALL_RUN, "run");
+
+    assert_eq!(got.code, Some(2), "{}", got.stderr);
+    assert_eq!(got.stdout, "");
+}
+
+#[test]
+fn script_exits_2_on_a_bad_command_line() {
+    let (f, _repo, _base) = script_fixture("usage");
+
+    let got = run_script(&f, &[], ALL_RUN, "");
+    assert_eq!(got.code, Some(2));
+    assert!(got.stderr.starts_with("usage:"), "{}", got.stderr);
+
+    let got = run_script(&f, &["no-such-ref"], ALL_RUN, "");
+    assert_eq!(got.code, Some(2));
+    assert!(got.stderr.contains("not a commit"), "{}", got.stderr);
+    assert!(got.calls.is_empty());
+}
