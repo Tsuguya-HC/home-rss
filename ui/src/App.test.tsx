@@ -280,6 +280,57 @@ describe('App', () => {
       expect(feedRow('Feed B').className).toContain('feed-item--active')
       expect(screen.queryByText('読み込み中...')).toBeNull()
     })
+
+    // #276: the earlier answer used to overwrite the later one.
+    it('shows the feed selected last when the earlier answer comes back last', async () => {
+      const user = userEvent.setup()
+      await mount([feedA, feedB], [a1, b1])
+
+      await user.click(screen.getByText('Feed A'))
+      await user.click(screen.getByText('Feed B'))
+      await answer('GET', '/api/articles?feed_id=fb&unread=true', 200, [b1])
+      await answer('GET', '/api/articles?feed_id=fa&unread=true', 200, [a1])
+
+      expect(listedTitles()).toEqual(['B1'])
+      expect(feedRow('Feed B').className).toContain('feed-item--active')
+      expect(screen.queryByText('読み込み中...')).toBeNull()
+    })
+
+    // #276: the earlier answer used to show its articles and end the loading.
+    it('keeps loading until the feed selected last answers', async () => {
+      const user = userEvent.setup()
+      await mount([feedA, feedB], [a1, b1])
+
+      await user.click(screen.getByText('Feed A'))
+      await user.click(screen.getByText('Feed B'))
+      await answer('GET', '/api/articles?feed_id=fa&unread=true', 200, [a1])
+
+      expect(screen.getByText('読み込み中...')).toBeTruthy()
+      expect(listedTitles()).toEqual([])
+
+      await answer('GET', '/api/articles?feed_id=fb&unread=true', 200, [b1])
+
+      expect(listedTitles()).toEqual(['B1'])
+      expect(screen.queryByText('読み込み中...')).toBeNull()
+    })
+
+    it('does not report a failure of a list it no longer shows', async () => {
+      const user = userEvent.setup()
+      await mount([feedA, feedB], [a1, b1])
+
+      await user.click(screen.getByText('Feed A'))
+      await user.click(screen.getByText('Feed B'))
+      await answer('GET', '/api/articles?feed_id=fa&unread=true', 500, {
+        error: 'internal server error',
+      })
+
+      expect(errorBanner()).toBeNull()
+      expect(screen.getByText('読み込み中...')).toBeTruthy()
+
+      await answer('GET', '/api/articles?feed_id=fb&unread=true', 200, [b1])
+
+      expect(listedTitles()).toEqual(['B1'])
+    })
   })
 
   describe('opening an article', () => {
@@ -299,9 +350,30 @@ describe('App', () => {
       expect(badgeOf(feedRow('Feed A'))).toBe('1')
       expect(badgeOf(feedRow('Feed B'))).toBe('1')
       expect(badgeOf(feedRow('すべて'))).toBe('2')
-      // The unread-only list drops what was just read; the detail keeps it.
-      expect(listedTitles()).toEqual(['A2', 'B1'])
+      // #107: the unread-only list keeps what was just read until it is reloaded.
+      expect(listedTitles()).toEqual(['A1', 'A2', 'B1'])
       expect(detailTitle()).toBe('A1')
+    })
+
+    it('keeps every article read in the unread-only list until the list is reloaded', async () => {
+      const user = userEvent.setup()
+      await mount([feedA, feedB], [a1, a2, b1])
+
+      await user.click(screen.getByText('A1'))
+      await answer('POST', '/api/articles/a1/read', 204)
+      await user.click(screen.getByText('A2'))
+      await answer('POST', '/api/articles/a2/read', 204)
+
+      expect(listedTitles()).toEqual(['A1', 'A2', 'B1'])
+      expect(badgeOf(feedRow('Feed A'))).toBeNull()
+      expect(badgeOf(feedRow('すべて'))).toBe('1')
+
+      await user.click(screen.getByText('Feed B'))
+      await answer('GET', '/api/articles?feed_id=fb&unread=true', 200, [b1])
+      await user.click(screen.getByText('すべて'))
+      await answer('GET', UNREAD, 200, [b1])
+
+      expect(listedTitles()).toEqual(['B1'])
     })
 
     it('keeps it unread and shows the error when marking it read fails', async () => {
@@ -348,7 +420,7 @@ describe('App', () => {
       await mount([feedA], [a1, a2])
       await user.click(screen.getByText('A1'))
       await answer('POST', '/api/articles/a1/read', 204)
-      expect(listedTitles()).toEqual(['A2'])
+      expect(listedTitles()).toEqual(['A1', 'A2'])
 
       await user.click(screen.getByRole('checkbox', { name: '未読のみ' }))
 
@@ -394,6 +466,37 @@ describe('App', () => {
       expect(badgeOf(feedRow('Feed A'))).toBeNull()
       expect(badgeOf(feedRow('Feed B'))).toBeNull()
       expect(badgeOf(feedRow('すべて'))).toBeNull()
+      await answer('GET', UNREAD, 200, [])
+      expect(screen.getByText('記事がありません')).toBeTruthy()
+    })
+
+    // #107: marking everything read is a reload, so it also drops articles
+    // that were opened and kept in the list.
+    it('drops the articles opened before from the unread-only list', async () => {
+      const user = userEvent.setup()
+      await mount([feedA], [a1, a2])
+      await user.click(screen.getByText('A1'))
+      await answer('POST', '/api/articles/a1/read', 204)
+
+      await user.click(screen.getByRole('button', { name: '全既読' }))
+      await answer('POST', '/api/articles/read-all', 204)
+      await answer('GET', UNREAD, 200, [])
+
+      expect(screen.getByText('記事がありません')).toBeTruthy()
+    })
+
+    it('reloads the list for the selection made while the server was confirming', async () => {
+      const user = userEvent.setup()
+      await mount([feedA, feedB], [a1, b1])
+
+      await user.click(screen.getByRole('button', { name: '全既読' }))
+      const readAll = await take('POST', '/api/articles/read-all')
+      await user.click(screen.getByText('Feed B'))
+      await answer('GET', '/api/articles?feed_id=fb&unread=true', 200, [b1])
+      await reply(readAll, 204)
+      await answer('GET', '/api/articles?feed_id=fb&unread=true', 200, [])
+
+      expect(issued.filter((r) => r === `GET ${UNREAD}`)).toHaveLength(2)
       expect(screen.getByText('記事がありません')).toBeTruthy()
     })
 
@@ -433,6 +536,30 @@ describe('App', () => {
       expect(listedTitles()).toEqual(['A1', 'B1'])
       expect(screen.queryByPlaceholderText('https://example.com/feed.xml')).toBeNull()
       expect(errorBanner()).toBeNull()
+    })
+
+    // #276: the reload used the selection from when the add was sent.
+    it('reloads the list for the feed selected while the add was in flight', async () => {
+      const user = userEvent.setup()
+      const feedC = feed('fc', 'Feed C')
+      await mount([feedA, feedB], [a1, b1])
+      await user.click(screen.getByText('Feed A'))
+      await answer('GET', '/api/articles?feed_id=fa&unread=true', 200, [a1])
+
+      await submitFeed(user, 'https://fc.example/feed.xml')
+      const post = await take('POST', '/api/feeds')
+      await user.click(screen.getByRole('button', { name: 'キャンセル' }))
+      await user.click(screen.getByText('Feed B'))
+      await answer('GET', '/api/articles?feed_id=fb&unread=true', 200, [b1])
+
+      await reply(post, 201, feedC)
+      await answer('GET', '/api/feeds', 200, [feedA, feedB, feedC])
+      await answer('GET', UNREAD, 200, [a1, b1])
+      await answer('GET', '/api/articles?feed_id=fb&unread=true', 200, [b1])
+
+      expect(isPending('GET', '/api/articles?feed_id=fa&unread=true')).toBe(false)
+      expect(feedRow('Feed B').className).toContain('feed-item--active')
+      expect(listedTitles()).toEqual(['B1'])
     })
 
     it('still reloads the lists, and shows why, when the add fails', async () => {
@@ -529,6 +656,43 @@ describe('App', () => {
       expect(detailTitle()).toBeNull()
       // The unread counts, and the list for all feeds.
       expect(pending.filter((p) => p.method === 'GET' && p.url === UNREAD)).toHaveLength(2)
+    })
+
+    // #276: the deleted feed's list was requested last and emptied this one.
+    it('lists all feeds once the selected feed is deleted', async () => {
+      const user = userEvent.setup()
+      await mount([feedA, feedB], [a1, b1])
+      await user.click(screen.getByText('Feed A'))
+      await answer('GET', '/api/articles?feed_id=fa&unread=true', 200, [a1])
+
+      await deleteFeed(user, 'Feed A')
+      await answer('DELETE', '/api/feeds/fa', 204)
+      await answer('GET', '/api/feeds', 200, [feedB])
+      await answer('GET', UNREAD, 200, [b1])
+      await answer('GET', UNREAD, 200, [b1])
+
+      expect(isPending('GET', '/api/articles?feed_id=fa&unread=true')).toBe(false)
+      expect(listedTitles()).toEqual(['B1'])
+      expect(screen.queryByText('読み込み中...')).toBeNull()
+    })
+
+    it('keeps the feed selected while the delete was in flight', async () => {
+      const user = userEvent.setup()
+      await mount([feedA, feedB], [a1, b1])
+      await user.click(screen.getByText('Feed A'))
+      await answer('GET', '/api/articles?feed_id=fa&unread=true', 200, [a1])
+
+      await deleteFeed(user, 'Feed A')
+      const del = await take('DELETE', '/api/feeds/fa')
+      await user.click(screen.getByText('Feed B'))
+      await answer('GET', '/api/articles?feed_id=fb&unread=true', 200, [b1])
+      await reply(del, 204)
+      await answer('GET', '/api/feeds', 200, [feedB])
+      await answer('GET', UNREAD, 200, [b1])
+      await answer('GET', '/api/articles?feed_id=fb&unread=true', 200, [b1])
+
+      expect(feedRow('Feed B').className).toContain('feed-item--active')
+      expect(listedTitles()).toEqual(['B1'])
     })
 
     it('keeps the feed and shows the error when the server refuses', async () => {
