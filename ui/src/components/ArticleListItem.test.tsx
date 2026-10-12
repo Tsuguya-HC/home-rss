@@ -102,14 +102,14 @@ describe('ArticleListItem', () => {
     expect(screen.getByText('First article')).toBeTruthy()
   })
 
-  // The thumbnail layout class follows the article's image_url, not whether the image
-  // is currently displayed, so the row keeps its layout after a load failure.
-  it('keeps the thumbnail layout class after the image fails to load', () => {
+  // #203: the class was decided from article.image_url, so a failed image left the
+  // row in the thumbnail's flex layout with nothing to fill it.
+  it('drops the thumbnail layout class after the image fails to load', () => {
     const { container } = renderItem()
 
     fireEvent.error(thumbnail(container)!)
 
-    expect(container.querySelector('.article-item--with-thumbnail')).not.toBeNull()
+    expect(container.querySelector('.article-item--with-thumbnail')).toBeNull()
   })
 
   // Only `error` hides the thumbnail; the component has no `load` handler, so this
@@ -130,6 +130,7 @@ describe('ArticleListItem', () => {
     rerenderWith({ image_url: 'https://example.com/a1-new.png' })
 
     expect(thumbnail(container)!.getAttribute('src')).toBe('https://example.com/a1-new.png')
+    expect(container.querySelector('.article-item--with-thumbnail')).not.toBeNull()
   })
 
   it('shows the thumbnail again when another article reuses the same image url', () => {
