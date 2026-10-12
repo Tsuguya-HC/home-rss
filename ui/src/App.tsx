@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Feed, Article } from './types'
 import { api } from './api'
 import { Sidebar } from './components/Sidebar'
@@ -14,10 +14,15 @@ export default function App() {
   const [selectedFeedId, setSelectedFeedId] = useState<string | null>(null)
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null)
   const [showUnreadOnly, setShowUnreadOnly] = useState(true)
-  const [readIds, setReadIds] = useState<Set<string>>(new Set())
   const [mobileView, setMobileView] = useState<MobileView>('list')
   const [error, setError] = useState<string | null>(null)
   const [loadingArticles, setLoadingArticles] = useState(false)
+  // Read after an await, where the render's selectedFeedId and showUnreadOnly
+  // may already be stale (#276).
+  const selection = useRef({ feedId: selectedFeedId, unreadOnly: showUnreadOnly })
+  // Only the latest list request may touch the list, whatever order the
+  // answers arrive in (#276).
+  const latestArticlesRequest = useRef(0)
 
   const withError = async (fn: () => Promise<void>) => {
     try {
@@ -43,23 +48,28 @@ export default function App() {
   }, [loadUnreadCounts])
 
   const loadArticles = useCallback(async () => {
+    const request = ++latestArticlesRequest.current
+    const isLatest = () => request === latestArticlesRequest.current
+    const { feedId, unreadOnly } = selection.current
     setLoadingArticles(true)
     try {
-      const articles = await api.getArticles(selectedFeedId, showUnreadOnly)
-      setArticles(articles)
-      setReadIds(new Set())
+      const articles = await api.getArticles(feedId, unreadOnly)
+      if (isLatest()) setArticles(articles)
+    } catch (e) {
+      if (isLatest()) throw e
     } finally {
-      setLoadingArticles(false)
+      if (isLatest()) setLoadingArticles(false)
     }
-  }, [selectedFeedId, showUnreadOnly])
+  }, [])
 
   useEffect(() => {
     withError(loadFeeds)
   }, [loadFeeds])
 
   useEffect(() => {
+    selection.current = { feedId: selectedFeedId, unreadOnly: showUnreadOnly }
     withError(loadArticles)
-  }, [loadArticles])
+  }, [selectedFeedId, showUnreadOnly, loadArticles])
 
   const handleSelectFeed = (feedId: string | null) => {
     setSelectedFeedId(feedId)
@@ -72,7 +82,8 @@ export default function App() {
     setMobileView('detail')
     await withError(async () => {
       await api.markRead(article.id)
-      setReadIds((prev) => new Set([...prev, article.id]))
+      // The list keeps the article, even when it shows only unread ones, until
+      // it is reloaded: dropping it at once loses the reader's place (#107).
       setUnreadCounts((prev) => ({
         ...prev,
         [article.feed_id]: Math.max(0, (prev[article.feed_id] || 0) - 1),
@@ -83,8 +94,8 @@ export default function App() {
   const handleMarkAllRead = () =>
     withError(async () => {
       await api.markAllRead()
-      setReadIds(new Set(articles.map((a) => a.id)))
       setUnreadCounts({})
+      await loadArticles()
     })
 
   const handleAddFeed = async (url: string) => {
@@ -134,12 +145,16 @@ export default function App() {
   const handleDeleteFeed = async (id: string) => {
     await withError(async () => {
       await api.deleteFeed(id)
-      if (selectedFeedId === id) {
+      if (selection.current.feedId === id) {
+        // The selection change reloads the list for all feeds; reloading here
+        // as well would send that request twice.
         setSelectedFeedId(null)
         setSelectedArticle(null)
+        await loadFeeds()
+      } else {
+        await loadFeeds()
+        await loadArticles()
       }
-      await loadFeeds()
-      await loadArticles()
     })
   }
 
@@ -168,8 +183,6 @@ export default function App() {
     })
   }
 
-  const visibleArticles = showUnreadOnly ? articles.filter((a) => !readIds.has(a.id)) : articles
-
   const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0)
 
   return (
@@ -197,7 +210,7 @@ export default function App() {
           className={`article-list${mobileView === 'detail' ? ' article-list--hidden' : ''}`}
         >
           <ArticleListPanel
-            articles={visibleArticles}
+            articles={articles}
             loading={loadingArticles}
             showUnreadOnly={showUnreadOnly}
             selectedArticle={selectedArticle}
