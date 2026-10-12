@@ -60,6 +60,41 @@ describe('AddFeedModal', () => {
     expect((screen.getByRole('button', { name: '追加' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
+  // #198: try/finally without catch only put the button back to '追加'; nothing said
+  // the add had failed, and the rejection escaped the submit handler.
+  it('shows the error and returns the button to idle when onAdd rejects', async () => {
+    const onAdd = vi.fn<() => Promise<void>>().mockRejectedValue(new Error('feed fetch failed'))
+    renderModal(onAdd)
+
+    submitWith(FEED_URL)
+
+    expect((await screen.findByRole('alert')).textContent).toBe('feed fetch failed')
+    expect((screen.getByRole('button', { name: '追加' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('clears the previous error when submitting again', async () => {
+    let resolve!: () => void
+    const onAdd = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error('feed fetch failed'))
+      .mockReturnValueOnce(
+        new Promise<void>((r) => {
+          resolve = r
+        }),
+      )
+    renderModal(onAdd)
+    submitWith(FEED_URL)
+    await screen.findByRole('alert')
+
+    submitWith(FEED_URL)
+
+    expect(screen.queryByRole('alert')).toBeNull()
+    await act(async () => {
+      resolve()
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('calls onClose when the cancel button is clicked', async () => {
     const user = userEvent.setup()
     const { onClose } = renderModal()
