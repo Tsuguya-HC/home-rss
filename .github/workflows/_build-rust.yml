@@ -81,7 +81,7 @@ jobs:
       # なら、PR が書けるスコープから成果物へ至る経路が存在しない
       # ——「タグビルドをキャッシュ無しの別ワークフローに分ける」という
       # 構造的な対処を、ここで満たしている。
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: ${{ !inputs.publish }}
 
       # The ceiling is the node, not this runner. containerd-shim-spin v0.25.1 —
