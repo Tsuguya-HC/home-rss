@@ -17,7 +17,7 @@ env:
   # to be updated by hand together with the version.
   # renovate: datasource=github-releases depName=amacneil/dbmate
   DBMATE_VERSION: "2.37.0"
-  DBMATE_SHA256: "47e284b3d8cbad1ba5f090495aa05afd1bbd5f35e2ed5577aad06da74ce780ce"
+  DBMATE_SHA256: "f855e99a0f0a81322014bf686b1cb820d2b4d8074e4eadafd64b851b80ecb15a"
 
 jobs:
   e2e:
