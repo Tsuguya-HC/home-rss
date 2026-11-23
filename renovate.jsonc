@@ -115,6 +115,17 @@
     },
     {
       "description": [
+        "A range-to-exact pin (:pinDevDependencies) never clears the age gate either:",
+        "#156 pinned four dev-dependencies whose targets were all 1-5 months old, and",
+        "renovate/stability-days still sat pending from 2026-09-26 to 2026-11-22.",
+        "A pin happens once per dependency; every later bump of the pinned version",
+        "is an ordinary patch/minor/major and goes through the 3-day gate as usual."
+      ],
+      "matchUpdateTypes": ["pin"],
+      "minimumReleaseAge": "0"
+    },
+    {
+      "description": [
         "Lock file maintenance refreshes transitive versions; there is no single",
         "release to age, so the gate can never be satisfied. horenso#66 was stuck",
         "pending on it with automerge enabled, which means it would never have",
