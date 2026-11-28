@@ -14,7 +14,7 @@ env:
   # The release has no checksum file, so the tarball's hash is pinned here and
   # has to be updated by hand together with the version.
   # renovate: datasource=github-releases depName=taiki-e/cargo-llvm-cov
-  CARGO_LLVM_COV_VERSION: "0.9.1"
+  CARGO_LLVM_COV_VERSION: "0.9.2"
   CARGO_LLVM_COV_SHA256: "b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a"
 
 jobs:
