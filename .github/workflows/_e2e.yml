@@ -16,7 +16,7 @@ env:
   # The release has no checksum file, so the binary's hash is pinned here and has
   # to be updated by hand together with the version.
   # renovate: datasource=github-releases depName=amacneil/dbmate
-  DBMATE_VERSION: "2.38.1"
+  DBMATE_VERSION: "2.38.2"
   DBMATE_SHA256: "3e2c62735e0e63f3e5e4de6a3fa5c8a29ac9a34dcb8631a08d9589ab943ad9bd"
 
 jobs:
